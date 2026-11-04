@@ -44,7 +44,7 @@ class Browser(object):
         extra = []
         if relay_alive():
             extra = ["--proxy-server=http://127.0.0.1:%d" % RELAY_PORT,
-                     "--proxy-bypass-list=<-loopback>"]
+                     "--proxy-bypass-list=127.0.0.1;localhost;::1"]
         self.proc = cgpt.launch_browser(
             self.port, self.profile, headless=False,
             log_path=os.path.join(HERE, "chrome.log"), extra_args=extra,

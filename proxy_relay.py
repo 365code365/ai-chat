@@ -177,6 +177,9 @@ def _open_via_socks(up, host, port):
 
 
 def open_target(host, port):
+    # 本机地址永远直连，避免把管理页/客户页也绕进代理
+    if host in ("127.0.0.1", "localhost", "::1"):
+        return socket.create_connection((host, port), timeout=20), b""
     up = parse_upstream(load_upstream())
     if not up:
         return socket.create_connection((host, port), timeout=20), b""

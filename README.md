@@ -17,7 +17,8 @@ ADMIN_USER=admin ADMIN_PASSWORD=你的密码 python3 admin_server.py --port 8899
 ```
 
 改密码：删掉 `data/auth.json` 重启（会重新生成），或直接用上面的环境变量。
-密码用 PBKDF2-SHA256（12 万次）加盐存储，会话是 HttpOnly Cookie，12 小时过期。
+密码用 PBKDF2-SHA256（12 万次）加盐存储，会话是 HttpOnly Cookie，12 小时过期，
+并持久化在 `data/sessions.json`（0600）——**重启服务不用重新登录**。
 
 ![管理后台](docs/ui_accounts.png)
 

@@ -213,6 +213,14 @@ function cardRow(c) {
     <div class="brand-chip ${esc(c.brand)}">${brandMap[c.brand] || "CARD"}</div>
     <div class="card-main">
       <div class="card-num">${esc(c.masked)}</div>
+      <div class="card-plans">
+        <span>可用套餐</span>
+        ${["plus", "pro"].map((pl) => `
+          <label class="plan-toggle ${(c.plans || []).includes(pl) ? "on" : ""}">
+            <input type="checkbox" data-cardplan="${esc(c.id)}" value="${pl}"
+              ${(c.plans || []).includes(pl) ? "checked" : ""} /> ${pl === "plus" ? "Plus" : "Pro"}
+          </label>`).join("")}
+      </div>
       <div class="card-code">
         <span>兑换码</span>
         <code>${esc(c.code || "—")}</code>
@@ -402,6 +410,9 @@ $("#rawInput").addEventListener("keydown", (e) => {
 function openCardModal(accountId) {
   $("#cardModal").classList.remove("hidden");
   $("#scrim").classList.add("on");
+  $("#newPlans").innerHTML = ["plus", "pro"].map((pl) =>
+    `<label><input type="checkbox" value="${pl}" checked> ${pl === "plus" ? "Plus" : "Pro"}</label>`
+  ).join("");
   $("#newAccounts").innerHTML = state.accounts.length
     ? state.accounts.map((a) =>
         `<label><input type="checkbox" value="${esc(a.id)}"
@@ -489,6 +500,7 @@ $("#cardSave").addEventListener("click", async () => {
     line1: $("#newLine1").value.trim(),
     label: $("#newLabel").value.trim(),
     accountIds: [...document.querySelectorAll("#newAccounts input:checked")].map((x) => x.value),
+    plans: [...document.querySelectorAll("#newPlans input:checked")].map((x) => x.value),
   };
   if (!payload.number.replace(/\D/g, "") || !payload.exp || !payload.cvc) {
     return toast("卡号 / 有效期 / 安全码必填", "bad");
@@ -512,6 +524,24 @@ $("#cardSave").addEventListener("click", async () => {
 });
 
 $("#cardList").addEventListener("change", async (e) => {
+  const planBox = e.target.closest("[data-cardplan]");
+  if (planBox) {
+    const cardId = planBox.dataset.cardplan;
+    const plans = [...document.querySelectorAll(`[data-cardplan="${cardId}"]`)]
+      .filter((x) => x.checked).map((x) => x.value);
+    if (!plans.length) {
+      planBox.checked = true;
+      return toast("至少保留一个可用套餐", "bad");
+    }
+    try {
+      await api(`/api/cards/${encodeURIComponent(cardId)}`, {
+        method: "PATCH", body: JSON.stringify({ plans }),
+      });
+      toast("可用套餐已更新：" + plans.map((p) => p.toUpperCase()).join(" / "), "ok");
+      await loadAll();
+    } catch (err) { toast(err.message, "bad"); }
+    return;
+  }
   const box = e.target.closest("[data-bindacc]");
   if (!box) return;
   const cardId = box.dataset.bindacc;

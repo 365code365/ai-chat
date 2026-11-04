@@ -31,7 +31,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import cgpt
 from browser import BROWSER
 from store import (  # noqa: F401
-    SHOT_DIR, customer_card_view, ensure_codes, find_card_by_code,
+    SHOT_DIR, card_plans, customer_card_view, ensure_codes, find_card_by_code,
     load_cards, load_store, save_cards,
 )
 
@@ -274,11 +274,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, {"ok": False, "error": "兑换码无效，请核对后重试"})
         view = customer_card_view(card)
         used = bool(card.get("codeUsedAt"))
+        allowed = card_plans(card)
         return self._send(200, {
             "ok": True,
             "card": view,
             "used": used,
-            "plans": ["plus", "pro"],
+            "plans": allowed,
         })
 
     def api_grab_session(self):
@@ -301,6 +302,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._err("兑换码无效")
         if plan not in ("plus", "pro"):
             return self._err("请选择 Plus 或 Pro")
+        if plan not in card_plans(card):
+            return self._err("这个兑换码只能开通 %s" % " / ".join(
+                p.capitalize() for p in card_plans(card)))
         if not str(raw).strip():
             return self._err("请先提供 ChatGPT 登录信息")
 

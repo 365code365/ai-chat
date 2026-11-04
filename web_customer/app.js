@@ -63,6 +63,7 @@ async function verify() {
     if (!d.ok) return showHint(d.error || "兑换码无效", "bad");
     state.code = code;
     state.card = d.card;
+    applyPlans(d.plans || ["plus", "pro"]);
     $("#cardBrandIcon").textContent = (d.card.brand || "CARD").toUpperCase().slice(0, 4);
     $("#cardLast4").textContent = d.card.last4 || "••••";
     $("#cardExp").textContent = d.card.exp || "--/--";
@@ -93,6 +94,17 @@ codeInput.addEventListener("keydown", (e) => {
 });
 
 /* ------------------------------- 第二步 ------------------------------- */
+function applyPlans(allowed) {
+  const all = $$(".plan");
+  all.forEach((b) => b.classList.toggle("hidden", !allowed.includes(b.dataset.plan)));
+  const first = all.find((b) => !b.classList.contains("hidden"));
+  state.plan = first ? first.dataset.plan : "plus";
+  all.forEach((b) => b.classList.toggle("selected", b === first));
+  $("#planNote").textContent = allowed.length === 1
+    ? `该兑换码仅支持 ${allowed[0].toUpperCase()} 套餐`
+    : "";
+}
+
 $$(".plan").forEach((b) => {
   b.addEventListener("click", () => {
     state.plan = b.dataset.plan;

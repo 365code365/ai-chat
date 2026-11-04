@@ -36,7 +36,7 @@ from store import (  # noqa: F401
     DATA_DIR, SHOT_DIR, STORE_PATH, CARDS_PATH, luhn_ok, card_brand, mask_pan,
     load_cards, save_cards, public_card, normalize_exp, mask, load_store,
     save_store, public_account, gen_code, ensure_codes, migrate_cards,
-    card_account_ids, _store_lock,
+    card_account_ids, card_plans, _store_lock,
 )
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -430,6 +430,8 @@ class Handler(BaseHTTPRequestHandler):
             "city": (body.get("city") or "").strip(),
             "line1": (body.get("line1") or "").strip(),
             "accountIds": account_ids,
+            "plans": [p for p in (body.get("plans") or ["plus", "pro"]) if p in ("plus", "pro")]
+                     or ["plus", "pro"],
             "status": "active",
             "createdAt": int(time.time()),
             "lastUsedAt": None,
@@ -467,6 +469,9 @@ class Handler(BaseHTTPRequestHandler):
             card["accountIds"] = sorted(ids)
         if "status" in body and body["status"] in ("active", "used", "disabled"):
             card["status"] = body["status"]
+        if isinstance(body.get("plans"), list):
+            plans = [p for p in body["plans"] if p in ("plus", "pro")]
+            card["plans"] = plans or ["plus", "pro"]
         if "label" in body:
             card["label"] = (body["label"] or "").strip()
         if "holder" in body:

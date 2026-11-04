@@ -9,11 +9,13 @@ import hmac
 import json
 import os
 import secrets
+import threading
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(HERE, "data")
 AUTH_PATH = os.path.join(DATA_DIR, "auth.json")
+SESSION_PATH = os.path.join(DATA_DIR, "sessions.json")
 INIT_PW_PATH = os.path.join(DATA_DIR, "初始密码.txt")
 
 ITERATIONS = 120000
@@ -21,6 +23,32 @@ SESSION_TTL = 12 * 3600
 COOKIE_NAME = "td_session"
 
 _sessions = {}
+_session_lock = threading.Lock()
+
+
+def _load_sessions():
+    """启动时恢复未过期的会话，重启服务不再掉登录。"""
+    try:
+        with open(SESSION_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return
+    now = time.time()
+    for token, item in (data.get("sessions") or {}).items():
+        if isinstance(item, dict) and item.get("exp", 0) > now:
+            _sessions[token] = item
+
+
+def _save_sessions():
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        tmp = SESSION_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"sessions": _sessions}, f, ensure_ascii=False, indent=2)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, SESSION_PATH)
+    except Exception:
+        pass
 
 
 def _hash(password, salt):
@@ -70,7 +98,9 @@ def verify(user, password):
 
 def create_session(user):
     token = secrets.token_urlsafe(32)
-    _sessions[token] = {"user": user, "exp": time.time() + SESSION_TTL}
+    with _session_lock:
+        _sessions[token] = {"user": user, "exp": time.time() + SESSION_TTL}
+        _save_sessions()
     return token, SESSION_TTL
 
 
@@ -81,13 +111,17 @@ def check_session(token):
     if not item:
         return None
     if item["exp"] < time.time():
-        _sessions.pop(token, None)
+        with _session_lock:
+            _sessions.pop(token, None)
+            _save_sessions()
         return None
     return item["user"]
 
 
 def revoke(token):
-    _sessions.pop(token or "", None)
+    with _session_lock:
+        _sessions.pop(token or "", None)
+        _save_sessions()
 
 
 def current_user(cookie_header):
@@ -99,3 +133,6 @@ def current_user(cookie_header):
         if k == COOKIE_NAME:
             return check_session(v)
     return None
+
+
+_load_sessions()

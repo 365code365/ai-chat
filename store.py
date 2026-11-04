@@ -83,6 +83,9 @@ def migrate_cards():
     data = load_cards()
     changed = False
     for c in data["cards"]:
+        if not isinstance(c.get("plans"), list) or not c.get("plans"):
+            c["plans"] = list(VALID_PLANS)
+            changed = True
         if not isinstance(c.get("accountIds"), list):
             c["accountIds"] = card_account_ids(c)
             changed = True
@@ -134,6 +137,17 @@ def card_account_ids(card):
     return [old] if old else []
 
 
+VALID_PLANS = ("plus", "pro")
+
+
+def card_plans(card):
+    """这张卡允许买的套餐，默认两个都行。"""
+    plans = card.get("plans")
+    if not isinstance(plans, list) or not plans:
+        return list(VALID_PLANS)
+    return [x for x in plans if x in VALID_PLANS] or list(VALID_PLANS)
+
+
 def public_card(card, accounts=None):
     accounts = accounts or []
     ids = card_account_ids(card)
@@ -156,6 +170,7 @@ def public_card(card, accounts=None):
         "city": card.get("city", ""),
         "line1": card.get("line1", ""),
         "code": card.get("code", ""),
+        "plans": card_plans(card),
         "codeUsedAt": card.get("codeUsedAt"),
         "accountIds": ids,
         "accounts": linked,

@@ -67,7 +67,7 @@ def debugger_ready(port, timeout=1.5):
     return None
 
 
-def launch_browser(port, profile, headless=False, log_path=None):
+def launch_browser(port, profile, headless=False, log_path=None, extra_args=None):
     cmd = [
         CHROME,
         "--no-sandbox",
@@ -77,6 +77,7 @@ def launch_browser(port, profile, headless=False, log_path=None):
         "--no-default-browser-check",
         "--window-size=1440,960",
     ]
+    cmd += list(extra_args or [])
     if headless:
         cmd += ["--headless=new", "--disable-gpu"]
     cmd.append("about:blank")

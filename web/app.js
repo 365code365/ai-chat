@@ -88,6 +88,7 @@ async function doLogin() {
     const d = await api("/api/login", { method: "POST", body: JSON.stringify({ user, password }) });
     hideLogin(d.user);
     await loadAll();
+    if (typeof loadProxy === "function") loadProxy();
     toast("已登录", "ok");
   } catch (e) {
     $("#loginErr").textContent = e.message;
@@ -106,6 +107,7 @@ $("#logoutBtn").addEventListener("click", async () => {
 /* ------------------------------- 导航 ------------------------------- */
 function setView(view) {
   state.view = view;
+  if (view === "proxy" && typeof loadProxy === "function") loadProxy();
   $$(".nav-item").forEach((b) => b.classList.toggle("active", b.dataset.view === view));
   $$(".view").forEach((v) => (v.hidden = v.id !== `view-${view}`));
 }
@@ -842,6 +844,67 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
     if (!$("#cardModal").classList.contains("hidden")) closeCardModal();
     else closeDrawer();
+  }
+});
+
+/* ------------------------------- 代理 ------------------------------- */
+async function loadProxy() {
+  try {
+    const d = await api("/api/proxy");
+    $("#proxyInput").value = d.upstream || "";
+    $("#relayState").textContent = d.relayAlive ? "中继运行中 · " + d.relayPort : "中继未运行";
+    $("#relayState").className = "pill-state " + (d.relayAlive ? "ok" : "bad");
+  } catch (e) {
+    $("#relayState").textContent = "读取失败";
+    $("#relayState").className = "pill-state bad";
+  }
+}
+
+async function saveProxy(value) {
+  try {
+    const d = await api("/api/proxy", { method: "POST", body: JSON.stringify({ upstream: value }) });
+    $("#proxyInput").value = d.upstream || "";
+    $("#proxyHint").textContent = d.upstream ? "已保存，点右侧「重启浏览器并应用」生效" : "已切回直连";
+    $("#proxyHint").className = "hint ok";
+    toast(d.upstream ? "代理已保存" : "已切回直连", "ok");
+    await loadProxy();
+  } catch (e) {
+    $("#proxyHint").textContent = e.message;
+    $("#proxyHint").className = "hint bad";
+    toast(e.message, "bad");
+  }
+}
+
+$("#proxySaveBtn")?.addEventListener("click", () => saveProxy($("#proxyInput").value.trim()));
+$("#proxyClearBtn")?.addEventListener("click", () => saveProxy(""));
+
+$("#proxyRestartBtn")?.addEventListener("click", async () => {
+  const btn = $("#proxyRestartBtn");
+  busy(btn, true);
+  try {
+    await api("/api/proxy/restart", { method: "POST" });
+    toast("浏览器已重启，代理生效", "ok");
+    await loadProxy();
+    await refreshStatus();
+  } catch (e) {
+    toast(e.message, "bad");
+  } finally {
+    busy(btn, false);
+  }
+});
+
+$("#testIpBtn")?.addEventListener("click", async () => {
+  const btn = $("#testIpBtn");
+  busy(btn, true);
+  $("#proxyExit").textContent = "检测中…";
+  try {
+    const d = await api("/api/proxy/test", { method: "POST" });
+    if (!d.ok) throw new Error(d.error || "检测失败");
+    $("#proxyExit").textContent = `${d.ip}${d.country ? " · " + d.country : ""} · ${d.ms}ms`;
+  } catch (e) {
+    $("#proxyExit").textContent = "检测失败：" + e.message;
+  } finally {
+    busy(btn, false);
   }
 });
 

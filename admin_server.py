@@ -26,9 +26,12 @@ import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
+import requests
+
 import admin_auth
 import cgpt
-from browser import BROWSER, Browser  # noqa: F401
+import proxy_relay
+from browser import BROWSER, RELAY_PORT, Browser, relay_alive  # noqa: F401
 from store import (  # noqa: F401
     DATA_DIR, SHOT_DIR, STORE_PATH, CARDS_PATH, luhn_ok, card_brand, mask_pan,
     load_cards, save_cards, public_card, normalize_exp, mask, load_store,
@@ -185,6 +188,8 @@ class Handler(BaseHTTPRequestHandler):
         if not self._guard(path):
             return self._send(401, {"error": "未登录"})
         try:
+            if path == "/api/proxy":
+                return self._send(200, self.proxy_payload())
             if path == "/api/session":
                 return self._send(200, {"ok": bool(self._authed()),
                                         "user": self._authed() or ""})
@@ -214,6 +219,12 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path == "/api/accounts":
                 return self.api_import()
+            if path == "/api/proxy":
+                return self.api_proxy_save()
+            if path == "/api/proxy/test":
+                return self.api_proxy_test()
+            if path == "/api/proxy/restart":
+                return self.api_proxy_restart()
             if path == "/api/login":
                 return self.api_login()
             if path == "/api/logout":
@@ -276,6 +287,70 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, {"ok": True, "removed": before - len(store["accounts"])})
         except Exception as exc:
             return self._err(exc, 500)
+
+    # ---------- 代理 ----------
+    def proxy_payload(self):
+        upstream = proxy_relay.load_upstream()
+        info = None
+        if upstream:
+            try:
+                info = proxy_relay.parse_upstream(upstream)
+            except Exception:
+                info = None
+        return {
+            "upstream": upstream,
+            "valid": bool(info) if upstream else True,
+            "relayPort": RELAY_PORT,
+            "relayAlive": relay_alive(),
+            "browserUsesRelay": relay_alive(),
+            "hint": "保存后点「重启浏览器」让代理生效" if upstream else "当前直连",
+        }
+
+    def api_proxy_save(self):
+        body = self._body()
+        upstream = (body.get("upstream") or "").strip()
+        if upstream:
+            try:
+                proxy_relay.parse_upstream(upstream)
+            except Exception as exc:
+                return self._err(str(exc))
+        os.makedirs(DATA_DIR, exist_ok=True)
+        tmp = os.path.join(DATA_DIR, "proxy.json.tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"upstream": upstream, "updatedAt": int(time.time())}, f,
+                      ensure_ascii=False, indent=2)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, os.path.join(DATA_DIR, "proxy.json"))
+        return self._send(200, self.proxy_payload())
+
+    def api_proxy_test(self):
+        if not relay_alive():
+            return self._err("中继没在跑，先启动 proxy_relay.py")
+        proxies = {"http": "http://127.0.0.1:%d" % RELAY_PORT,
+                   "https": "http://127.0.0.1:%d" % RELAY_PORT}
+        t0 = time.time()
+        last = ""
+        for url in ("https://api.ipify.org?format=json", "https://ifconfig.co/json"):
+            try:
+                r = requests.get(url, proxies=proxies, timeout=15,
+                                 headers={"User-Agent": "Mozilla/5.0"})
+                if r.ok:
+                    data = r.json()
+                    return self._send(200, {
+                        "ok": True,
+                        "ip": data.get("ip") or data.get("ip_addr") or "",
+                        "country": data.get("country") or data.get("country_iso") or "",
+                        "ms": int((time.time() - t0) * 1000),
+                    })
+                last = "HTTP %d" % r.status_code
+            except Exception as exc:
+                last = str(exc)[:80]
+        return self._send(200, {"ok": False, "error": last or "测试失败"})
+
+    def api_proxy_restart(self):
+        BROWSER.restart()
+        return self._send(200, {"ok": True, "status": self.status_payload(),
+                                "proxy": self.proxy_payload()})
 
     # ---------- 登录 ----------
     def api_login(self):

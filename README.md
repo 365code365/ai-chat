@@ -40,9 +40,30 @@ ADMIN_USER=admin ADMIN_PASSWORD=你的密码 python3 admin_server.py --port 8899
 - 客户页只按兑换码取卡，不暴露账号
 - 兑换成功后标记「已兑换」，状态留在卡库里
 
+## 代理（拿地区价）
+
+后台侧边栏「代理」可填上游代理，登录/订阅/结账所有流量都会走它：
+
+```
+浏览器 → 127.0.0.1:8898（本地中继）→ 你填的上游（http / https / socks5）→ 目标
+```
+
+- Chrome 只在启动时读 `--proxy-server`，所以**第一次启用要点「重启浏览器并应用」**；之后改上游只改配置，中继按连接实时读取，不用再重启
+- 支持 `http://user:pass@host:port`、`https://...`、`socks5://...`，留空即直连
+- 「检测出口 IP」会让中继去请求 ipify，显示真正的出口 IP 和延迟
+- `127.0.0.1` 走 `--proxy-bypass-list=<-loopback>` 直连，不会被代理
+
+```bash
+python3 proxy_relay.py --port 8898      # 手动起中继（start.sh 会自动起）
+```
+
+> 币种由 IP 区域 + 账号账单地区共同决定；换 IP 后要重新打开订阅页才会刷新价格。
+> 卡国家与 IP 差异过大时 Stripe 可能直接拒付，机房 IP 也更容易被 Cloudflare 挑战。
+
 ## 启动
 
 ```bash
+python3 proxy_relay.py --port 8898      # 代理中继（可选，start.sh 会起）
 python3 admin_server.py --port 8899     # 后台
 python3 customer_server.py --port 8900  # 客户页
 ```

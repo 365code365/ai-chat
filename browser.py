@@ -2,10 +2,23 @@
 import os
 import time
 
+import socket
+import subprocess
+import time
+
 import cgpt
 from store import SHOT_DIR
 
 BROWSER_PORT = 9333
+RELAY_PORT = 8898
+
+
+def relay_alive(port=RELAY_PORT, timeout=0.6):
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=timeout):
+            return True
+    except OSError:
+        return False
 HERE = os.path.dirname(os.path.abspath(__file__))
 BROWSER_PROFILE = os.path.join(HERE, ".chrome-gpt-profile")
 
@@ -28,9 +41,13 @@ class Browser(object):
         if self.running():
             return
         self.close()
+        extra = []
+        if relay_alive():
+            extra = ["--proxy-server=http://127.0.0.1:%d" % RELAY_PORT,
+                     "--proxy-bypass-list=<-loopback>"]
         self.proc = cgpt.launch_browser(
             self.port, self.profile, headless=False,
-            log_path=os.path.join(HERE, "chrome.log"),
+            log_path=os.path.join(HERE, "chrome.log"), extra_args=extra,
         )
         self.started_at = time.time()
 
@@ -52,6 +69,19 @@ class Browser(object):
         self.cdp.call("Page.enable")
         self.cdp.call("Network.enable")
         return self.cdp
+
+    def kill(self):
+        """真正结束 Chrome 进程（close 只断 CDP）。"""
+        self.close()
+        try:
+            subprocess.run(["pkill", "-f", self.profile], timeout=10)
+        except Exception:
+            pass
+        time.sleep(1.5)
+
+    def restart(self):
+        self.kill()
+        self.ensure()
 
     def close(self):
         if self.cdp is not None:

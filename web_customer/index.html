@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ChatGPT 订阅兑换</title>
+<link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+<div class="page">
+
+  <header class="brand">
+    <div class="logo">✦</div>
+    <div>
+      <b>ChatGPT 订阅兑换</b>
+      <span>输入兑换码 · 粘贴登录信息 · 完成订阅</span>
+    </div>
+  </header>
+
+  <main class="panel">
+    <div class="progress">
+      <span class="pstep active" data-s="1"><i>1</i>兑换码</span>
+      <span class="pstep" data-s="2"><i>2</i>确认</span>
+      <span class="pstep" data-s="3"><i>3</i>订阅</span>
+    </div>
+
+    <!-- 第一步 -->
+    <section class="step" id="step1">
+      <h1>输入兑换码</h1>
+      <p class="lead">兑换码对应一个已充值好的支付方式，你无需提供任何银行卡信息。</p>
+      <div class="code-box">
+        <input id="codeInput" autocomplete="off" spellcheck="false"
+               placeholder="XXXX-XXXX-XX" maxlength="14" />
+        <button class="btn primary" id="verifyBtn">验证</button>
+      </div>
+      <p class="hint" id="codeHint"></p>
+    </section>
+
+    <!-- 第二步 -->
+    <section class="step hidden" id="step2">
+      <h1>确认订阅</h1>
+      <div class="card-ready">
+        <div class="card-icon" id="cardBrandIcon">VISA</div>
+        <div class="card-text">
+          <b id="cardLabel">已匹配支付方式</b>
+          <span>•••• •••• •••• <em id="cardLast4">4242</em> · 有效期 <em id="cardExp">12/29</em></span>
+        </div>
+        <span class="tag ok">已就绪</span>
+      </div>
+
+      <div class="field">
+        <label>选择套餐</label>
+        <div class="plans">
+          <button class="plan" data-plan="plus">
+            <b>Plus</b><span>日常首选</span>
+          </button>
+          <button class="plan" data-plan="pro">
+            <b>Pro</b><span>最强化模型</span>
+          </button>
+        </div>
+      </div>
+
+      <div class="field">
+        <label>粘贴 ChatGPT 登录信息</label>
+        <textarea id="sessionInput" spellcheck="false"
+          placeholder='把 https://chatgpt.com/api/auth/session 的内容整段粘贴到这里'></textarea>
+        <div class="row">
+          <button class="btn ghost" id="grabBtn">从当前浏览器自动获取</button>
+          <a class="ghost-link" href="https://chatgpt.com/api/auth/session"
+             target="_blank" rel="noopener">手动打开该页面 ↗</a>
+          <span class="muted" id="sessionHint"></span>
+        </div>
+        <p class="hint" id="grabHint">
+          点按钮会用本机 Chrome 打开 <code>chatgpt.com/api/auth/session</code> 并自动回填登录信息。
+        </p>
+      </div>
+
+      <button class="btn primary block" id="subscribeBtn">开始订阅</button>
+      <p class="hint">订阅会使用兑换码对应的支付方式，实际扣款由 OpenAI 完成。</p>
+    </section>
+
+    <!-- 第三步 -->
+    <section class="step hidden" id="step3">
+      <h1 id="progressTitle">正在订阅…</h1>
+      <p class="lead" id="progressMsg">请不要关闭页面</p>
+
+      <ol class="timeline" id="timeline">
+        <li data-k="login"><i></i><span>登录 ChatGPT</span><em></em></li>
+        <li data-k="plan"><i></i><span>打开订阅页</span><em></em></li>
+        <li data-k="checkout"><i></i><span>进入付款页</span><em></em></li>
+        <li data-k="card"><i></i><span>填写支付信息</span><em></em></li>
+        <li data-k="address"><i></i><span>填写账单地址</span><em></em></li>
+        <li data-k="submit"><i></i><span>提交订阅</span><em></em></li>
+      </ol>
+
+      <div class="result hidden" id="result"></div>
+    </section>
+  </main>
+
+  <footer class="foot">
+    兑换码一次性使用 · 卡信息由后台保管，页面不会展示完整卡号
+  </footer>
+</div>
+<script src="/app.js"></script>
+</body>
+</html>

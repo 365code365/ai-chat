@@ -26,265 +26,26 @@ import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
+import admin_auth
 import cgpt
+from browser import BROWSER, Browser  # noqa: F401
+from store import (  # noqa: F401
+    DATA_DIR, SHOT_DIR, STORE_PATH, CARDS_PATH, luhn_ok, card_brand, mask_pan,
+    load_cards, save_cards, public_card, normalize_exp, mask, load_store,
+    save_store, public_account, gen_code, ensure_codes, migrate_cards,
+    card_account_ids, _store_lock,
+)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 WEB_DIR = os.path.join(HERE, "web")
-DATA_DIR = os.path.join(HERE, "data")
-SHOT_DIR = os.path.join(DATA_DIR, "shots")
-STORE_PATH = os.path.join(DATA_DIR, "accounts.json")
-BROWSER_PORT = 9333
-BROWSER_PROFILE = os.path.join(HERE, ".chrome-gpt-profile")
 
-os.makedirs(SHOT_DIR, exist_ok=True)
 
 _lock = threading.RLock()
-_store_lock = threading.RLock()
 
 
 # --------------------------------------------------------------------------- #
 # 账号存储
 # --------------------------------------------------------------------------- #
-def load_store():
-    with _store_lock:
-        if not os.path.exists(STORE_PATH):
-            return {"accounts": []}
-        try:
-            with open(STORE_PATH, encoding="utf-8") as f:
-                data = json.load(f)
-            data.setdefault("accounts", [])
-            return data
-        except Exception:
-            return {"accounts": []}
-
-
-def save_store(data):
-    with _store_lock:
-        tmp = STORE_PATH + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, STORE_PATH)
-
-
-def mask(tok):
-    if not tok:
-        return ""
-    if len(tok) <= 24:
-        return tok[:4] + "…" + tok[-4:]
-    return tok[:12] + "…" + tok[-6:]
-
-
-def public_account(acc, current_id=None):
-    return {
-        "id": acc["id"],
-        "alias": acc.get("alias", ""),
-        "email": acc.get("email", ""),
-        "name": acc.get("name", ""),
-        "plan": acc.get("plan", ""),
-        "planLabel": cgpt.PLAN_LABEL.get(acc.get("plan", ""), acc.get("plan", "")),
-        "accessExp": acc.get("accessExp"),
-        "accessExpText": cgpt.nice_exp(acc.get("accessExp")),
-        "sessionExpText": cgpt.nice_exp(acc.get("sessionExp")),
-        "hasSession": bool(acc.get("sessionToken")),
-        "status": acc.get("status", "unverified"),
-        "lastError": acc.get("lastError", ""),
-        "lastCheck": acc.get("lastCheck"),
-        "createdAt": acc.get("createdAt"),
-        "accessTokenMasked": mask(acc.get("accessToken", "")),
-        "sessionTokenMasked": mask(acc.get("sessionToken", "")),
-        "isCurrent": acc["id"] == current_id,
-        "shots": acc.get("shots", {}),
-    }
-
-
-# --------------------------------------------------------------------------- #
-# 浏览器单例
-# --------------------------------------------------------------------------- #
-class Browser(object):
-    def __init__(self):
-        self.port = BROWSER_PORT
-        self.profile = BROWSER_PROFILE
-        self.current_id = None      # 当前登录的账号 id
-        self.current_email = ""
-        self.cdp = None
-        self.tab_id = None
-        self.started_at = None
-        self.proc = None
-
-    # ---- 基础 ----
-    def running(self):
-        return cgpt.debugger_ready(self.port, 0.6) is not None
-
-    def ensure(self):
-        if self.running():
-            return
-        self.close()
-        self.proc = cgpt.launch_browser(
-            self.port, self.profile, headless=False,
-            log_path=os.path.join(HERE, "chrome.log"),
-        )
-        self.started_at = time.time()
-
-    def attach(self):
-        """返回绑定到 chatgpt.com 标签页的 CDP；浏览器没开就先拉起来。"""
-        self.ensure()
-        if self.cdp is not None:
-            try:
-                self.cdp.js("1", await_promise=False)
-                return self.cdp
-            except Exception:
-                self.cdp = None
-        tab = cgpt.find_chatgpt_tab(self.port)
-        if tab is None:
-            tab = cgpt.open_tab(self.port, "https://chatgpt.com/")
-            time.sleep(1.5)
-        self.tab_id = tab["id"]
-        self.cdp = cgpt.CDP(tab["webSocketDebuggerUrl"])
-        self.cdp.call("Page.enable")
-        self.cdp.call("Network.enable")
-        return self.cdp
-
-    def close(self):
-        if self.cdp is not None:
-            self.cdp.close()
-            self.cdp = None
-        self.current_id = None
-        self.current_email = ""
-
-    # ---- 业务 ----
-    def login(self, acc):
-        self.ensure()
-        cdp = self.attach()
-        email = cgpt.login_account(cdp, acc)
-        if not email:
-            raise RuntimeError("登录失败：会话可能已失效，请重新导出 token")
-        if acc.get("email") and email.lower() != acc["email"].lower():
-            raise RuntimeError("登录到了其它账号（%s），请重试" % email)
-        self.current_id = acc["id"]
-        self.current_email = email
-        return email
-
-    def ensure_login(self, acc):
-        self.ensure()
-        if self.current_id == acc["id"] and self.current_email:
-            cdp = self.attach()
-            if cgpt.current_session_email(cdp):
-                return cdp
-        cdp = self.attach()
-        if self.current_id != acc["id"] or not cgpt.current_session_email(cdp):
-            self.login(acc)
-            cdp = self.attach()
-        return cdp
-
-    def start_checkout(self, acc, plan):
-        """打开订阅弹窗 → 点购买 → 停在 Stripe 结账页。"""
-        cdp = self.ensure_login(acc)
-        cgpt.open_plan_dialog(cdp, plan, os.path.join(SHOT_DIR, "%s-%s.png" % (acc["id"], plan)))
-        clicked = cgpt.click_in_dialog(
-            cdp, r"/立即购买|升级至|切换至|订阅|Buy|Upgrade/") or ""
-        url = cgpt.wait_checkout(cdp, timeout=60)
-        ready = cgpt.wait_card_ready(self.port, timeout=60) if url else False
-        amount = ""
-        deadline = time.time() + 20
-        while time.time() < deadline and not amount:
-            amount = cgpt.checkout_amount(cdp)
-            if not amount:
-                time.sleep(0.8)
-        shot = cgpt.capture(cdp, os.path.join(SHOT_DIR, "%s-checkout.png" % acc["id"]))
-        return {
-            "ok": bool(url),
-            "url": url,
-            "clicked": clicked,
-            "ready": ready,
-            "amount": amount,
-            "screenshotUrl": "/api/shots/%s-checkout.png?t=%d" % (acc["id"], int(time.time())),
-            "screenshot": shot,
-            "email": self.current_email,
-        }
-
-    def ensure_same_account(self, acc):
-        """校验浏览器里当前登录的就是这个账号（重启后 current_id 可能为空）。"""
-        cdp = self.attach()
-        email = cgpt.current_session_email(cdp)
-        if not email:
-            raise RuntimeError("浏览器当前没有登录态，请先点「去结账」")
-        if acc.get("email") and email.lower() != acc["email"].lower():
-            raise RuntimeError("浏览器当前登录的是 %s，请先切回该账号" % email)
-        self.current_id = acc["id"]
-        self.current_email = email
-        return cdp
-
-    def fill_card(self, number, exp, cvc):
-        vals = cgpt.fill_card(self.port, number, exp, cvc)
-        num = vals.get("number", "")
-        digits = "".join(ch for ch in num if ch.isdigit())
-        return {
-            "fields": {
-                "number": ("**** **** **** " + digits[-4:]) if len(digits) >= 4 else "****",
-                "expiry": vals.get("expiry", ""),
-                "cvc": "***",
-            },
-            "count": sum(1 for k in ("number", "expiry", "cvc") if vals.get(k)),
-        }
-
-    def reveal_billing(self):
-        cdp = self.attach()
-        return cgpt.reveal_billing(cdp, self.port)
-
-    def fill_address(self, fields):
-        return cgpt.fill_address(
-            self.port,
-            name=fields.get("name", ""),
-            country=fields.get("country", ""),
-            postal=fields.get("postal", ""),
-            state=fields.get("state", ""),
-            city=fields.get("city", ""),
-            line1=fields.get("line1", ""),
-            line2=fields.get("line2", ""),
-        )
-
-    def submit_checkout(self):
-        cdp = self.attach()
-        clicked = cgpt.click_in_page(cdp, r"^订阅$|^Subscribe$|^确认订阅$|^Pay$|^Buy$") or ""
-        if not clicked:
-            raise RuntimeError("没找到「订阅」按钮，页面可能不在结账状态")
-        deadline = time.time() + 45
-        text, url = "", ""
-        while time.time() < deadline:
-            time.sleep(1.5)
-            try:
-                url = cdp.js("location.href", await_promise=False) or ""
-                text = cdp.js(
-                    "(()=>{const t=document.body.innerText;return t.slice(0,600)})()",
-                    await_promise=False,
-                ) or ""
-            except Exception:
-                continue
-            if "/checkout/" not in url or any(
-                k in text for k in ("谢谢", "成功", "订阅已完成", "declined", "被拒绝", "出错", "错误")
-            ):
-                break
-        return {
-            "clicked": clicked,
-            "url": url,
-            "text": text,
-            "pending": "/checkout/" in url and not any(
-                k in text for k in ("谢谢", "成功", "declined", "被拒绝", "出错", "错误")),
-        }
-
-    def open_plan(self, acc, plan):
-        cdp = self.ensure_login(acc)
-        shot_path = os.path.join(SHOT_DIR, "%s-%s.png" % (acc["id"], plan))
-        res = cgpt.open_plan_dialog(cdp, plan, shot_path)
-        res["screenshotUrl"] = "/api/shots/%s-%s.png?t=%d" % (acc["id"], plan, int(time.time()))
-        res["email"] = self.current_email
-        return res
-
-
-BROWSER = Browser()
-
-
 def cgpt_cdp(browser):
     """拿到当前 chatgpt 标签页的 CDP（供截图用）。"""
     return browser.attach()
@@ -408,13 +169,31 @@ class Handler(BaseHTTPRequestHandler):
             return {}
 
     # ---------- 路由 ----------
+    def _authed(self):
+        return admin_auth.current_user(self.headers.get("Cookie"))
+
+    def _guard(self, path):
+        """除登录/健康检查外，/api/* 一律要求会话。"""
+        if not path.startswith("/api/"):
+            return True
+        if path in ("/api/login", "/api/session", "/api/health"):
+            return True
+        return bool(self._authed())
+
     def do_GET(self):
         path = self.path.split("?")[0]
+        if not self._guard(path):
+            return self._send(401, {"error": "未登录"})
         try:
+            if path == "/api/session":
+                return self._send(200, {"ok": bool(self._authed()),
+                                        "user": self._authed() or ""})
             if path == "/api/status":
                 return self.api_status()
             if path == "/api/accounts":
                 return self.api_accounts()
+            if path == "/api/cards":
+                return self.api_cards()
             m = re.match(r"^/api/accounts/([^/]+)/token$", path)
             if m:
                 qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
@@ -430,9 +209,25 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = self.path.split("?")[0]
+        if not self._guard(path):
+            return self._send(401, {"error": "未登录"})
         try:
             if path == "/api/accounts":
                 return self.api_import()
+            if path == "/api/login":
+                return self.api_login()
+            if path == "/api/logout":
+                return self.api_logout()
+            if path == "/api/cards":
+                return self.api_card_create()
+            if path == "/api/import-session":
+                return self.api_import_session()
+            m = re.match(r"^/api/cards/([^/]+)/reveal$", path)
+            if m:
+                return self.api_card_reveal(m.group(1))
+            m = re.match(r"^/api/cards/([^/]+)/rotate-code$", path)
+            if m:
+                return self.api_card_rotate(m.group(1))
             if path == "/api/browser/start":
                 with _lock:
                     BROWSER.ensure()
@@ -444,8 +239,28 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:
             return self._err(exc, 500)
 
+    def do_PATCH(self):
+        path = self.path.split("?")[0]
+        if not self._guard(path):
+            return self._send(401, {"error": "未登录"})
+        m = re.match(r"^/api/cards/([^/]+)$", path)
+        if not m:
+            return self._err("未知接口", 404)
+        try:
+            return self.api_card_update(m.group(1))
+        except Exception as exc:
+            return self._err(exc, 500)
+
     def do_DELETE(self):
         path = self.path.split("?")[0]
+        if not self._guard(path):
+            return self._send(401, {"error": "未登录"})
+        mc = re.match(r"^/api/cards/([^/]+)$", path)
+        if mc:
+            try:
+                return self.api_card_delete(mc.group(1))
+            except Exception as exc:
+                return self._err(exc, 500)
         m = re.match(r"^/api/accounts/([^/]+)$", path)
         if not m:
             return self._err("未知接口", 404)
@@ -462,6 +277,24 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:
             return self._err(exc, 500)
 
+    # ---------- 登录 ----------
+    def api_login(self):
+        body = self._body()
+        user = body.get("user") or ""
+        password = body.get("password") or ""
+        if not admin_auth.verify(user, password):
+            return self._send(401, {"error": "用户名或密码不对"})
+        token, ttl = admin_auth.create_session(user)
+        return self._send(200, {"ok": True, "user": user},
+                          extra={"Set-Cookie": "%s=%s; Path=/; HttpOnly; SameSite=Lax; Max-Age=%d"
+                                               % (admin_auth.COOKIE_NAME, token, ttl)})
+
+    def api_logout(self):
+        admin_auth.revoke(admin_auth.current_user(self.headers.get("Cookie")))
+        return self._send(200, {"ok": True},
+                          extra={"Set-Cookie": "%s=; Path=/; HttpOnly; Max-Age=0"
+                                               % admin_auth.COOKIE_NAME})
+
     # ---------- 接口实现 ----------
     def status_payload(self):
         running = BROWSER.running()
@@ -476,13 +309,167 @@ class Handler(BaseHTTPRequestHandler):
             "server": {"pid": os.getpid(), "time": int(time.time())},
         }
 
+    # ---------- 卡库接口 ----------
+    def api_cards(self):
+        cards = load_cards()["cards"]
+        accounts = load_store()["accounts"]
+        return self._send(200, {
+            "cards": [public_card(c, accounts) for c in cards],
+            "accounts": [{"id": a["id"], "email": a.get("email", "")} for a in accounts],
+        })
+
+    def api_card_create(self):
+        body = self._body()
+        number = re.sub(r"\D", "", body.get("number", ""))
+        if len(number) < 12:
+            return self._err("卡号位数不对")
+        if not luhn_ok(number):
+            return self._err("卡号没通过 Luhn 校验，检查一下是否输错")
+        exp, mm, yy = normalize_exp(body.get("exp", ""))
+        cvc = re.sub(r"\D", "", body.get("cvc", ""))
+        if len(cvc) not in (3, 4):
+            return self._err("安全码应为 3-4 位")
+
+        account_ids = body.get("accountIds")
+        if not isinstance(account_ids, list):
+            account_ids = [body.get("accountId")] if body.get("accountId") else []
+        account_ids = [a for a in account_ids if a]
+        known = {a["id"] for a in load_store()["accounts"]}
+        bad = [a for a in account_ids if a not in known]
+        if bad:
+            return self._err("绑定的账号不存在：%s" % bad[0])
+
+        store = load_cards()
+        card = {
+            "id": hashlib.sha1((number + exp).encode()).hexdigest()[:12],
+            "label": (body.get("label") or "").strip(),
+            "number": number,
+            "exp": exp,
+            "expMonth": mm,
+            "expYear": yy,
+            "cvc": cvc,
+            "holder": (body.get("holder") or "").strip(),
+            "country": (body.get("country") or "JP").upper(),
+            "postal": (body.get("postal") or "").strip(),
+            "state": (body.get("state") or "").strip(),
+            "city": (body.get("city") or "").strip(),
+            "line1": (body.get("line1") or "").strip(),
+            "accountIds": account_ids,
+            "status": "active",
+            "createdAt": int(time.time()),
+            "lastUsedAt": None,
+            "code": gen_code(),
+            "codeUsedAt": None,
+        }
+        old = next((c for c in store["cards"] if c["id"] == card["id"]), None)
+        if old and old.get("code"):
+            card["code"] = old["code"]
+            card["codeUsedAt"] = old.get("codeUsedAt")
+        store["cards"] = [c for c in store["cards"] if c["id"] != card["id"]] + [card]
+        save_cards(store)
+        accounts = load_store()["accounts"]
+        return self._send(200, {"card": public_card(card, accounts)})
+
+    def api_card_update(self, card_id):
+        body = self._body()
+        store = load_cards()
+        card = next((c for c in store["cards"] if c["id"] == card_id), None)
+        if not card:
+            return self._err("卡不存在", 404)
+
+        if isinstance(body.get("accountIds"), list):
+            known = {a["id"] for a in load_store()["accounts"]}
+            ids = [a for a in body["accountIds"] if a in known]
+            card["accountIds"] = ids
+        if body.get("bindAccountId") or body.get("unbindAccountId"):
+            ids = set(card_account_ids(card))
+            if body.get("bindAccountId"):
+                if body["bindAccountId"] not in {a["id"] for a in load_store()["accounts"]}:
+                    return self._err("绑定的账号不存在")
+                ids.add(body["bindAccountId"])
+            if body.get("unbindAccountId"):
+                ids.discard(body["unbindAccountId"])
+            card["accountIds"] = sorted(ids)
+        if "status" in body and body["status"] in ("active", "used", "disabled"):
+            card["status"] = body["status"]
+        if "label" in body:
+            card["label"] = (body["label"] or "").strip()
+        if "holder" in body:
+            card["holder"] = (body["holder"] or "").strip()
+        if "postal" in body:
+            card["postal"] = (body["postal"] or "").strip()
+        if "state" in body:
+            card["state"] = (body["state"] or "").strip()
+        if "city" in body:
+            card["city"] = (body["city"] or "").strip()
+        if "line1" in body:
+            card["line1"] = (body["line1"] or "").strip()
+        save_cards(store)
+        return self._send(200, {"card": public_card(card, load_store()["accounts"])})
+
+    def api_card_delete(self, card_id):
+        store = load_cards()
+        before = len(store["cards"])
+        store["cards"] = [c for c in store["cards"] if c["id"] != card_id]
+        save_cards(store)
+        return self._send(200, {"ok": True, "removed": before - len(store["cards"])})
+
+    def api_card_rotate(self, card_id):
+        store = load_cards()
+        card = next((c for c in store["cards"] if c["id"] == card_id), None)
+        if not card:
+            return self._err("卡不存在", 404)
+        card["code"] = gen_code()
+        card["codeUsedAt"] = None
+        save_cards(store)
+        return self._send(200, {"card": public_card(card, load_store()["accounts"])})
+
+    def api_card_reveal(self, card_id):
+        store = load_cards()
+        card = next((c for c in store["cards"] if c["id"] == card_id), None)
+        if not card:
+            return self._err("卡不存在", 404)
+        return self._send(200, {"number": card["number"], "cvc": card["cvc"],
+                                "exp": card["exp"]})
+
+    def api_import_session(self):
+        """给 ChatGPT 页面上的书签脚本调用：text/plain 简单请求，免 CORS 预检。"""
+        body = self._body()
+        raw = body.get("raw") if isinstance(body, dict) and body.get("raw") else None
+        if raw is None:
+            raw = json.dumps(body, ensure_ascii=False)
+        items, err = cgpt.parse_session(raw)
+        if err:
+            return self._send(200, {"ok": False, "error": err},
+                              extra={"Access-Control-Allow-Origin": "*"})
+        imports = []
+        for it in items:
+            acc, perr = upsert_account(it)
+            if acc:
+                imports.append({"email": acc.get("email"), "plan": acc.get("plan")})
+        return self._send(200, {
+            "ok": bool(imports), "imported": imports,
+            "error": "" if imports else "没能导入",
+        }, extra={"Access-Control-Allow-Origin": "*"})
+
     def api_status(self):
         return self._send(200, self.status_payload())
 
     def api_accounts(self):
         store = load_store()
+        cards = load_cards()["cards"]
+        accounts = []
+        for a in store["accounts"]:
+            item = public_account(a, BROWSER.current_id)
+            bound = [c for c in cards if a["id"] in card_account_ids(c)]
+            item["cards"] = [{
+                "id": c["id"], "masked": mask_pan(c["number"]),
+                "brand": card_brand(c["number"])[1],
+                "last4": c["number"][-4:], "exp": c.get("exp", ""),
+            } for c in bound]
+            accounts.append(item)
         return self._send(200, {
-            "accounts": [public_account(a, BROWSER.current_id) for a in store["accounts"]],
+            "accounts": accounts,
             "status": self.status_payload(),
         })
 
@@ -560,10 +547,29 @@ class Handler(BaseHTTPRequestHandler):
 
         if action == "card":
             body = self._body()
+            card = None
+            if body.get("cardId"):
+                cards = load_cards()["cards"]
+                card = next((c for c in cards if c["id"] == body["cardId"]), None)
+                if not card:
+                    return self._err("卡库里没有这张卡", 404)
+                if card.get("accountId") and card["accountId"] != acc_id:
+                    return self._err("这张卡已绑定其它账号，先解绑再使用")
+                number, exp, cvc = card["number"], card["exp"], card["cvc"]
+            else:
+                number, exp, cvc = (body.get("number", ""), body.get("exp", ""),
+                                    body.get("cvc", ""))
             with _lock:
                 BROWSER.ensure_same_account(acc)
-                res = BROWSER.fill_card(
-                    body.get("number", ""), body.get("exp", ""), body.get("cvc", ""))
+                res = BROWSER.fill_card(number, exp, cvc)
+            if card is not None:
+                card["lastUsedAt"] = int(time.time())
+                cards = load_cards()
+                for c in cards["cards"]:
+                    if c["id"] == card["id"]:
+                        c["lastUsedAt"] = card["lastUsedAt"]
+                save_cards(cards)
+            res["cardId"] = card["id"] if card else None
             return self._send(200, res)
 
         if action == "reveal":
@@ -578,6 +584,20 @@ class Handler(BaseHTTPRequestHandler):
 
         if action == "address":
             body = self._body()
+            if body.get("cardId"):
+                cards = load_cards()["cards"]
+                card = next((c for c in cards if c["id"] == body["cardId"]), None)
+                if not card:
+                    return self._err("卡库里没有这张卡", 404)
+                body = {
+                    "name": card.get("holder", ""),
+                    "country": card.get("country", ""),
+                    "postal": card.get("postal", ""),
+                    "state": card.get("state", ""),
+                    "city": card.get("city", ""),
+                    "line1": card.get("line1", ""),
+                    "line2": "",
+                }
             with _lock:
                 BROWSER.ensure_same_account(acc)
                 res = BROWSER.fill_address(body)
@@ -651,6 +671,9 @@ def main():
     ap.add_argument("--host", default="127.0.0.1")
     args = ap.parse_args()
 
+    admin_auth.ensure_credentials()
+    migrate_cards()
+    ensure_codes()
     httpd = ThreadingHTTPServer((args.host, args.port), Handler)
     print("ChatGPT 账号管理台: http://%s:%d" % (args.host, args.port))
     print("数据目录: %s" % DATA_DIR)

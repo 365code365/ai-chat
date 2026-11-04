@@ -1,0 +1,179 @@
+"""CDP 与浏览器进程"""
+import base64
+import datetime
+import json
+import os
+import re
+import subprocess
+import time
+import urllib.parse
+
+import requests
+import websocket
+
+from .config import *  # noqa
+
+class CDP(object):
+    def __init__(self, ws_url, timeout=120):
+        self.ws = websocket.create_connection(
+            ws_url, max_size=None, suppress_origin=True, timeout=timeout
+        )
+        self._id = 0
+
+    def call(self, method, **params):
+        self._id += 1
+        mid = self._id
+        self.ws.send(json.dumps({"id": mid, "method": method, "params": params}))
+        while True:
+            msg = json.loads(self.ws.recv())
+            if msg.get("id") == mid:
+                if "error" in msg:
+                    raise RuntimeError("%s -> %s" % (method, msg["error"]))
+                return msg.get("result", {})
+
+    def js(self, expression, await_promise=True):
+        r = self.call(
+            "Runtime.evaluate",
+            expression=expression,
+            awaitPromise=await_promise,
+            returnByValue=True,
+        )
+        res = r.get("result", {})
+        if res.get("subtype") == "error":
+            raise RuntimeError(res.get("description", "JS 执行失败"))
+        return res.get("value")
+
+    def close(self):
+        try:
+            self.ws.close()
+        except Exception:
+            pass
+
+
+def _get(url, timeout=2):
+    return requests.get(url, timeout=timeout, proxies={})
+
+
+def debugger_ready(port, timeout=1.5):
+    end = time.time() + timeout
+    while time.time() < end:
+        try:
+            r = _get("http://127.0.0.1:%d/json/version" % port)
+            if r.ok:
+                return r.json()
+        except Exception:
+            pass
+        time.sleep(0.3)
+    return None
+
+
+def launch_browser(port, profile, headless=False, log_path=None):
+    cmd = [
+        CHROME,
+        "--no-sandbox",
+        "--user-data-dir=%s" % profile,
+        "--remote-debugging-port=%d" % port,
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--window-size=1440,960",
+    ]
+    if headless:
+        cmd += ["--headless=new", "--disable-gpu"]
+    cmd.append("about:blank")
+    log = open(log_path, "ab") if log_path else subprocess.DEVNULL
+    proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT,
+                            start_new_session=True)
+    if not debugger_ready(port, 45):
+        raise RuntimeError("Chrome 调试端口 %d 未就绪（见 chrome.log）" % port)
+    return proc
+
+
+def open_tab(port, url="about:blank"):
+    r = requests.put(
+        "http://127.0.0.1:%d/json/new?%s" % (port, urllib.parse.quote(url, safe=":/?&=%#")),
+        timeout=5,
+        proxies={},
+    )
+    return r.json()
+
+
+def list_pages(port):
+    try:
+        tabs = _get("http://127.0.0.1:%d/json/list" % port, timeout=3).json()
+    except Exception:
+        return []
+    return [t for t in tabs if t.get("type") == "page"]
+
+
+def find_chatgpt_tab(port):
+    for t in list_pages(port):
+        if t.get("url", "").startswith("https://chatgpt.com"):
+            return t
+    return None
+
+
+def close_tab(port, tab_id):
+    try:
+        _get("http://127.0.0.1:%d/json/close/%s" % (port, tab_id), timeout=3)
+    except Exception:
+        pass
+
+
+# --------------------------------------------------------------------------- #
+# 登录态
+# --------------------------------------------------------------------------- #
+
+
+def list_targets(port):
+    try:
+        return _get("http://127.0.0.1:%d/json/list" % port, timeout=3).json()
+    except Exception:
+        return []
+
+
+def capture(cdp, path, rect=None):
+    params = {"format": "png"}
+    if rect and rect.get("width") and rect.get("height"):
+        params["clip"] = {
+            "x": max(0, rect["x"]),
+            "y": max(0, rect["y"]),
+            "width": rect["width"],
+            "height": rect["height"],
+            "scale": 2,
+        }
+    data = cdp.call("Page.captureScreenshot", **params)["data"]
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as f:
+        f.write(base64.b64decode(data))
+    return path
+
+
+# --------------------------------------------------------------------------- #
+# 结账页（Stripe）
+# --------------------------------------------------------------------------- #
+
+
+def wait_page_ready(cdp, timeout=45):
+    end = time.time() + timeout
+    while time.time() < end:
+        try:
+            state = cdp.js("document.readyState", await_promise=False)
+            if state == "complete":
+                return True
+        except Exception:
+            pass
+        time.sleep(0.5)
+    return False
+
+
+def wait_for(cdp, expression, timeout=30, interval=1.0):
+    """轮询一段返回真值的 JS 表达式。"""
+    end = time.time() + timeout
+    while time.time() < end:
+        try:
+            if cdp.js(expression):
+                return True
+        except Exception:
+            pass
+        time.sleep(interval)
+    return False

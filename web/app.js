@@ -1,37 +1,36 @@
-/* ChatGPT 账号管理台 前端逻辑 */
-const $ = (sel, root = document) => root.querySelector(sel);
-const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
+/* ============================================================
+   TokenDesk — 前端逻辑
+   ============================================================ */
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 
 const state = {
   accounts: [],
+  cards: [],
   status: null,
+  view: "accounts",
   keyword: "",
-  busy: new Set(),
-  currentAcc: null,
-  currentPlan: null,
+  acc: null,
+  plan: null,
+  cardId: null,
 };
 
-/* ------------------------------- 基础工具 ------------------------------- */
+/* ------------------------------- 工具 ------------------------------- */
 async function api(path, opts = {}) {
-  const res = await fetch(path, {
-    headers: { "Content-Type": "application/json" },
-    ...opts,
-  });
-  let data = {};
-  try {
-    data = await res.json();
-  } catch (e) {
-    data = { error: `HTTP ${res.status}` };
+  const res = await fetch(path, { headers: { "Content-Type": "application/json" }, ...opts });
+  if (res.status === 401) {
+    showLogin();
+    throw new Error("未登录");
   }
+  let data = {};
+  try { data = await res.json(); } catch (e) { data = { error: `HTTP ${res.status}` }; }
   if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
   return data;
 }
 
-function esc(s) {
-  return String(s ?? "").replace(/[&<>"']/g, (c) => ({
-    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
-  }[c]));
-}
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => (
+  { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
+));
 
 function toast(msg, kind = "") {
   const el = document.createElement("div");
@@ -39,9 +38,9 @@ function toast(msg, kind = "") {
   el.textContent = msg;
   $("#toasts").appendChild(el);
   setTimeout(() => {
+    el.style.transition = "opacity .25s ease, transform .25s ease";
     el.style.opacity = "0";
     el.style.transform = "translateY(6px)";
-    el.style.transition = "all .25s ease";
     setTimeout(() => el.remove(), 260);
   }, 3600);
 }
@@ -52,183 +51,229 @@ function busy(el, on) {
   el.disabled = on;
 }
 
-function initials(acc) {
-  const src = acc.name || acc.email || "?";
-  const s = src.trim();
-  if (/[\u4e00-\u9fa5]/.test(s)) return s.slice(0, 2);
-  return s.slice(0, 2).toUpperCase();
+function initials(a) {
+  const s = (a.name || a.email || "?").trim();
+  return /[\u4e00-\u9fa5]/.test(s) ? s.slice(0, 2) : s.slice(0, 2).toUpperCase();
 }
 
 function remain(exp) {
-  if (!exp) return "未知";
+  if (!exp) return "—";
   const ms = exp * 1000 - Date.now();
   if (ms <= 0) return "已过期";
   const d = Math.floor(ms / 86400000);
   const h = Math.floor((ms % 86400000) / 3600000);
-  if (d > 0) return `剩 ${d} 天 ${h} 小时`;
-  const m = Math.floor((ms % 3600000) / 60000);
-  return `剩 ${h} 小时 ${m} 分`;
+  return d > 0 ? `${d} 天 ${h} 小时` : `${h} 小时`;
 }
+
+/* ------------------------------- 登录 ------------------------------- */
+function showLogin() {
+  $("#loginWrap").classList.remove("hidden");
+  $("#appRoot").classList.add("hidden");
+  setTimeout(() => $("#loginPass").focus(), 80);
+}
+
+function hideLogin(user) {
+  $("#loginWrap").classList.add("hidden");
+  $("#appRoot").classList.remove("hidden");
+  if (user) $("#userName").textContent = user;
+}
+
+async function doLogin() {
+  const user = $("#loginUser").value.trim();
+  const password = $("#loginPass").value;
+  const btn = $("#loginBtn");
+  $("#loginErr").textContent = "";
+  busy(btn, true);
+  try {
+    const d = await api("/api/login", { method: "POST", body: JSON.stringify({ user, password }) });
+    hideLogin(d.user);
+    await loadAll();
+    toast("已登录", "ok");
+  } catch (e) {
+    $("#loginErr").textContent = e.message;
+  } finally {
+    busy(btn, false);
+  }
+}
+
+$("#loginBtn").addEventListener("click", doLogin);
+$("#loginPass").addEventListener("keydown", (e) => { if (e.key === "Enter") doLogin(); });
+$("#logoutBtn").addEventListener("click", async () => {
+  try { await api("/api/logout", { method: "POST" }); } catch (e) { /* ignore */ }
+  showLogin();
+});
+
+/* ------------------------------- 导航 ------------------------------- */
+function setView(view) {
+  state.view = view;
+  $$(".nav-item").forEach((b) => b.classList.toggle("active", b.dataset.view === view));
+  $$(".view").forEach((v) => (v.hidden = v.id !== `view-${view}`));
+}
+
+$$(".nav-item").forEach((b) => b.addEventListener("click", () => setView(b.dataset.view)));
+$$("[data-goto]").forEach((b) => b.addEventListener("click", () => setView(b.dataset.goto)));
 
 /* ------------------------------- 渲染 ------------------------------- */
 function renderStatus() {
   const b = state.status?.browser || {};
-  const pill = $("#browserPill");
   const on = !!b.running;
-  pill.classList.toggle("on", on);
-  $("#browserText").textContent = on
-    ? `浏览器运行中 · ${b.currentEmail || "未登录"}`
-    : "浏览器未启动";
+  $("#engineDot").classList.toggle("on", on);
+  $("#engineTitle").textContent = on ? "浏览器运行中" : "浏览器未启动";
+  $("#engineSub").textContent = on ? (b.currentEmail || "已连接 · 未登录") : "点下方按钮启动";
 }
 
-function cardHtml(acc) {
-  const plan = (acc.plan || "free").toLowerCase();
-  const planClass = ["free", "go", "plus", "pro", "prolite", "team", "business", "enterprise"].includes(plan)
-    ? plan
-    : "free";
-  const expSoon = acc.accessExp && acc.accessExp * 1000 - Date.now() < 2 * 86400000;
-  const statusOk = acc.status === "active";
-  const statusText = acc.status === "active" ? "token 有效"
-    : acc.status === "invalid" ? (acc.lastError || "token 失效")
-    : "未校验";
-
-  const shotPlus = acc.shots?.plus?.price;
-  const shotPro = acc.shots?.pro?.price;
+function accountCard(a) {
+  const plan = (a.plan || "free").toLowerCase();
+  const cls = ["free", "go", "plus", "pro", "prolite", "team", "business", "enterprise"].includes(plan) ? plan : "free";
+  const ok = a.status === "active";
+  const soon = a.accessExp && a.accessExp * 1000 - Date.now() < 2 * 86400000;
+  const plus = a.shots?.plus?.price;
+  const pro = a.shots?.pro?.price;
+  const card = (a.cards || [])[0];
 
   return `
-  <article class="card ${acc.isCurrent ? "current" : ""}" data-id="${esc(acc.id)}">
-    <div class="card-top">
-      <div class="avatar">${esc(initials(acc))}</div>
-      <div class="who">
-        <div class="email" title="${esc(acc.email)}">${esc(acc.email || "未知邮箱")}</div>
-        <div class="alias">${esc(acc.alias || acc.name || "—")}</div>
+  <article class="account ${a.isCurrent ? "is-current" : ""}" data-id="${esc(a.id)}">
+    <div class="acc-top">
+      <div class="avatar">${esc(initials(a))}</div>
+      <div class="acc-id">
+        <div class="acc-email" title="${esc(a.email)}">${esc(a.email || "未知邮箱")}</div>
+        <div class="acc-alias">${esc(a.alias || a.name || "—")}</div>
       </div>
-      <span class="badge ${planClass}">${esc(acc.planLabel || plan)}</span>
+      <span class="badge ${cls}">${esc(a.planLabel || plan)}</span>
     </div>
 
-    <div class="meta">
-      <span class="sdot ${statusOk ? "ok" : acc.status === "invalid" ? "bad" : ""}"></span>
-      <span class="mono ${expSoon ? "warn" : ""}">${esc(remain(acc.accessExp))}</span>
-      <span class="sep">·</span>
-      <span>到期 ${esc(acc.accessExpText || "—")}</span>
+    <div class="acc-meta">
+      <span class="dot-status ${ok ? "ok" : a.status === "invalid" ? "bad" : ""}"></span>
+      <span class="${soon ? "warn" : ""}">${esc(remain(a.accessExp))}</span>
+      <span class="sep">/</span>
+      <span>到期 ${esc(a.accessExpText || "—")}</span>
     </div>
 
-    <div class="tokens">
-      <button class="chip" data-act="copy" data-type="access" title="点击复制 accessToken">
-        <span class="k">access</span>
-        <span class="v">${esc(acc.accessTokenMasked)}</span>
-        <span class="copy">复制</span>
-      </button>
-      ${acc.hasSession
-        ? `<button class="chip" data-act="copy" data-type="session" title="点击复制 sessionToken">
-             <span class="k">session</span>
-             <span class="v">${esc(acc.sessionTokenMasked)}</span>
-             <span class="copy">复制</span>
-           </button>`
-        : `<span class="chip missing"><span class="k">session</span><span class="v">缺失 · 无法浏览器登录</span></span>`}
+    <div class="bound-card ${card ? "has" : ""}">
+      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.7">
+        <rect x="3" y="6" width="18" height="12" rx="2.4"/><path d="M3 10.5h18"/>
+      </svg>
+      ${card
+        ? `<span>${esc(card.brand)} ···· ${esc(card.last4)}</span><span class="spacer"></span>
+           <button class="link" data-act="manage-cards">管理</button>`
+        : `<span>未绑定银行卡</span><span class="spacer"></span>
+           <button class="link" data-act="bind-card">去绑定</button>`}
     </div>
 
-    <div class="actions">
-      <div class="act-row">
-        <button class="btn" data-act="login" ${acc.hasSession ? "" : "disabled"}>一键登录</button>
+    <div class="acc-actions">
+      <div class="acc-row-1">
+        <button class="btn" data-act="login" ${a.hasSession ? "" : "disabled"}>一键登录</button>
         <span class="spacer"></span>
-        <button class="btn icon" data-act="check" title="重新校验 token">⟳</button>
-        <button class="btn icon danger" data-act="del" title="删除账号">✕</button>
-      </div>
-      <div class="act-row plans">
-        <button class="btn plan plus" data-act="plan" data-plan="plus" ${acc.hasSession ? "" : "disabled"}>
-          Plus<span class="price">${shotPlus ? esc(shotPlus) : ""}</span>
+        <button class="btn ghost tiny" data-act="check" title="重新校验 token">校验</button>
+        <button class="icon-btn danger" data-act="del" title="删除账号">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8">
+            <path d="M6 7h12M9.5 7V5.5h5V7M8 7l.7 12h6.6L16 7" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
         </button>
-        <button class="btn plan pro" data-act="plan" data-plan="pro" ${acc.hasSession ? "" : "disabled"}>
-          Pro<span class="price">${shotPro ? esc(shotPro) : ""}</span>
+      </div>
+      <div class="acc-row-2">
+        <button class="btn plus" data-act="plan" data-plan="plus" ${a.hasSession ? "" : "disabled"}>
+          Plus${plus ? `<span class="price">${esc(plus)}</span>` : ""}
+        </button>
+        <button class="btn pro" data-act="plan" data-plan="pro" ${a.hasSession ? "" : "disabled"}>
+          Pro${pro ? `<span class="price">${esc(pro)}</span>` : ""}
         </button>
       </div>
     </div>
   </article>`;
 }
 
-function render() {
+function renderAccounts() {
   const kw = state.keyword.trim().toLowerCase();
-  const list = state.accounts.filter((a) => {
-    if (!kw) return true;
-    return `${a.email} ${a.alias} ${a.name} ${a.plan}`.toLowerCase().includes(kw);
-  });
+  const list = state.accounts.filter((a) =>
+    !kw || `${a.email} ${a.alias} ${a.name} ${a.plan}`.toLowerCase().includes(kw));
 
-  $("#count").textContent = state.accounts.length;
-  $("#accounts").innerHTML = list.map(cardHtml).join("");
-  $("#empty").classList.toggle("hidden", state.accounts.length > 0);
-  if (state.accounts.length && !list.length) {
-    $("#accounts").innerHTML = `<p class="empty">没有匹配的账号</p>`;
-  }
+  $("#accountGrid").innerHTML = list.map(accountCard).join("");
+  $("#navAccountCount").textContent = state.accounts.length;
+  $("#accountEmpty").classList.toggle("hidden", state.accounts.length > 0);
   renderStatus();
+}
+
+function cardRow(c) {
+  const brandMap = { visa: "VISA", mastercard: "MC", amex: "AMEX", jcb: "JCB",
+    unionpay: "UP", discover: "DISC", card: "CARD" };
+  const boundIds = c.accountIds || [];
+  const chips = (c.accounts || []).map((a) =>
+    `<span class="bind-chip">${esc(a.email)}
+       <button data-act="unbind" data-id="${esc(c.id)}" data-acc="${esc(a.id)}" title="解绑">×</button>
+     </span>`).join("");
+  const menu = state.accounts.map((a) =>
+    `<label><input type="checkbox" data-bindacc="${esc(c.id)}" value="${esc(a.id)}"
+       ${boundIds.includes(a.id) ? "checked" : ""}> ${esc(a.email)}</label>`).join("");
+
+  return `
+  <div class="card-row ${c.status === "used" ? "used" : ""}" data-id="${esc(c.id)}">
+    <div class="brand-chip ${esc(c.brand)}">${brandMap[c.brand] || "CARD"}</div>
+    <div class="card-main">
+      <div class="card-num">${esc(c.masked)}</div>
+      <div class="card-code">
+        <span>兑换码</span>
+        <code>${esc(c.code || "—")}</code>
+        <button class="mini" data-act="copy-code" data-id="${esc(c.id)}" data-code="${esc(c.code || "")}">复制</button>
+        <button class="mini" data-act="rotate-code" data-id="${esc(c.id)}">重置</button>
+        ${c.codeUsedAt ? '<i class="used-tag">已兑换</i>' : ""}
+      </div>
+      <div class="card-sub">
+        ${c.label ? `<span>${esc(c.label)}</span><span class="sep">/</span>` : ""}
+        <span>${esc(c.exp)}</span>
+        ${c.holder ? `<span class="sep">/</span><span>${esc(c.holder)}</span>` : ""}
+        ${c.lastUsedAt ? `<span class="sep">/</span><span>用过</span>` : ""}
+      </div>
+    </div>
+    <div class="bind-area">
+      ${chips}
+      <details class="bind-add">
+        <summary>+ 绑定账号</summary>
+        <div class="bind-menu">${menu || "<div class='muted small' style='padding:8px'>还没有账号</div>"}</div>
+      </details>
+    </div>
+    <div class="card-actions">
+      <button class="btn ghost tiny" data-act="copy-card" data-id="${esc(c.id)}" title="复制完整卡信息，直接粘贴到支付表单">复制卡</button>
+      <button class="icon-btn danger" data-act="del-card" data-id="${esc(c.id)}" title="删除">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8">
+          <path d="M6 7h12M9.5 7V5.5h5V7M8 7l.7 12h6.6L16 7" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </button>
+    </div>
+  </div>`;
+}
+
+function renderCards() {
+  $("#cardList").innerHTML = state.cards.map(cardRow).join("");
+  $("#navCardCount").textContent = state.cards.length;
+  $("#cardEmpty").classList.toggle("hidden", state.cards.length > 0);
 }
 
 /* ------------------------------- 数据 ------------------------------- */
 async function loadAll() {
-  const data = await api("/api/accounts");
-  state.accounts = data.accounts || [];
-  state.status = data.status;
-  render();
+  const [acc, cards] = await Promise.all([api("/api/accounts"), api("/api/cards")]);
+  state.accounts = acc.accounts || [];
+  state.status = acc.status;
+  state.cards = cards.cards || [];
+  renderAccounts();
+  renderCards();
+  renderStatus();
 }
 
 async function refreshStatus() {
   try {
     state.status = await api("/api/status");
     renderStatus();
-    const cur = state.status?.browser?.currentId;
-    let changed = false;
-    state.accounts.forEach((a) => {
-      const isCur = a.id === cur;
-      if (a.isCurrent !== isCur) { a.isCurrent = isCur; changed = true; }
-    });
-    if (changed) render();
-  } catch (e) { /* 静默 */ }
+  } catch (e) { /* silent */ }
 }
 
-/* ------------------------------- 交互 ------------------------------- */
-async function importAccount() {
-  const raw = $("#rawInput").value.trim();
-  const alias = $("#aliasInput").value.trim();
-  const log = $("#importLog");
-  if (!raw) return toast("先粘贴 token 再导入", "bad");
-
-  busy($("#importBtn"), true);
-  log.innerHTML = "";
-  try {
-    const data = await api("/api/accounts", {
-      method: "POST",
-      body: JSON.stringify({ raw, alias }),
-    });
-    const results = data.results || [];
-    const ok = results.filter((r) => r.ok).length;
-    log.innerHTML = results
-      .map((r) => r.ok
-        ? `<div class="ok">✓ 已导入 ${esc(r.account.email)}（${esc(r.account.planLabel)}，${esc(remain(r.account.accessExp))}）</div>`
-        : `<div class="bad">✗ 导入失败：${esc(r.error || "未知错误")}</div>`)
-      .join("");
-    if (ok) {
-      $("#rawInput").value = "";
-      $("#aliasInput").value = "";
-      toast(`导入成功 ${ok} 个账号`, "ok");
-    } else {
-      toast("导入失败，检查 token 是否完整", "bad");
-    }
-    await loadAll();
-  } catch (e) {
-    toast(e.message, "bad");
-    log.innerHTML = `<div class="bad">✗ ${esc(e.message)}</div>`;
-  } finally {
-    busy($("#importBtn"), false);
-  }
-}
-
-async function loginAccount(id, btn) {
+/* ------------------------------- 账号操作 ------------------------------- */
+async function loginAccount(a, btn) {
   busy(btn, true);
-  toast("正在启动浏览器并注入会话…");
+  toast("正在注入会话并打开窗口…");
   try {
-    const data = await api(`/api/accounts/${encodeURIComponent(id)}/login`, { method: "POST" });
-    toast(`已登录 ${data.email}`, "ok");
-    state.status = data.status;
+    const d = await api(`/api/accounts/${encodeURIComponent(a.id)}/login`, { method: "POST" });
+    toast(`已登录 ${d.email}`, "ok");
     await loadAll();
   } catch (e) {
     toast(e.message, "bad");
@@ -237,106 +282,48 @@ async function loginAccount(id, btn) {
   }
 }
 
-async function openPlan(acc, plan, btn) {
-  state.currentAcc = acc;
-  state.currentPlan = plan;
-  $("#checkoutBox").classList.add("hidden");
-  $("#stagePlan").classList.remove("hidden");
-  $("#planNote").classList.remove("hidden");
-  $("#coAmount").textContent = "—";
-  $("#coState").className = "co-state";
-  $("#coState").textContent = "等待填写卡信息";
-  $("#submitBtn").disabled = true;
-  $("#submitBtn").textContent = "提交订阅";
-
-  const drawer = $("#drawer");
-  drawer.classList.add("open");
-  drawer.setAttribute("aria-hidden", "false");
-  $("#drawerTitle").textContent = plan === "plus" ? "Plus 订阅" : "Pro 订阅";
-  $("#drawerSub").textContent = `${acc.email} · 正在打开订阅页并选中套餐`;
-  $("#priceRow").innerHTML = "";
-  $("#drawerShot").removeAttribute("src");
-  $("#shotLoading").classList.remove("hidden");
-  $("#shotLoading").textContent = acc.isCurrent ? "正在打开订阅弹窗…" : "正在登录并打开订阅弹窗…";
-
+async function checkAccount(a, btn) {
   busy(btn, true);
   try {
-    const data = await api(`/api/accounts/${encodeURIComponent(acc.id)}/plan`, {
-      method: "POST",
-      body: JSON.stringify({ plan }),
-    });
-    state.status = data.status;
-
-    const tags = [];
-    if (data.price) tags.push(`<span class="price-tag">参考价 <b>${esc(data.price)}</b>/月</span>`);
-    if (data.cta) tags.push(`<span class="price-tag">按钮状态 <b>${esc(data.cta)}</b></span>`);
-    tags.push(`<span class="price-tag">套餐 <b>${esc(plan === "plus" ? "Plus" : "Pro")}</b> 已选中</span>`);
-    $("#priceRow").innerHTML = tags.join("");
-
-    if (data.screenshotUrl) {
-      const img = new Image();
-      img.onload = () => $("#shotLoading").classList.add("hidden");
-      img.onerror = () => { $("#shotLoading").textContent = "截图加载失败"; };
-      img.src = data.screenshotUrl;
-      $("#drawerShot").src = data.screenshotUrl;
-    } else {
-      $("#shotLoading").textContent = "没有拿到截图";
-    }
-    $("#drawerSub").textContent = `${data.email || acc.email} · 已打开 chatgpt.com 订阅页`;
-    toast(`${plan === "plus" ? "Plus" : "Pro"} 已选中，去浏览器窗口确认付款`, "ok");
+    const d = await api(`/api/accounts/${encodeURIComponent(a.id)}/check`, { method: "POST" });
+    toast(d.account.status === "active" ? "token 有效" : `失效：${d.account.lastError}`,
+      d.account.status === "active" ? "ok" : "bad");
     await loadAll();
   } catch (e) {
-    $("#shotLoading").textContent = e.message;
     toast(e.message, "bad");
   } finally {
     busy(btn, false);
   }
 }
 
-async function checkAccount(id, btn) {
-  busy(btn, true);
+async function deleteAccount(a) {
+  if (!confirm(`删除 ${a.email}？只删本地记录，不影响账号本身。`)) return;
   try {
-    const data = await api(`/api/accounts/${encodeURIComponent(id)}/check`, { method: "POST" });
-    const acc = data.account;
-    const idx = state.accounts.findIndex((a) => a.id === id);
-    if (idx >= 0) state.accounts[idx] = acc;
-    render();
-    toast(acc.status === "active" ? "token 有效" : `校验失败：${acc.lastError}`, acc.status === "active" ? "ok" : "bad");
-  } catch (e) {
-    toast(e.message, "bad");
-  } finally {
-    busy(btn, false);
-  }
-}
-
-async function deleteAccount(id, acc) {
-  if (!confirm(`确定删除 ${acc.email} ？只删本地记录，不影响账号本身。`)) return;
-  try {
-    await api(`/api/accounts/${encodeURIComponent(id)}`, { method: "DELETE" });
+    await api(`/api/accounts/${encodeURIComponent(a.id)}`, { method: "DELETE" });
     toast("已删除", "ok");
     await loadAll();
-  } catch (e) {
-    toast(e.message, "bad");
-  }
+  } catch (e) { toast(e.message, "bad"); }
 }
 
-async function copyToken(acc, type, chip) {
-  try {
-    const data = await api(`/api/accounts/${encodeURIComponent(acc.id)}/token?type=${type}`);
-    await navigator.clipboard.writeText(data.token || "");
-    const tip = chip.querySelector(".copy");
-    const old = tip.textContent;
-    tip.textContent = "已复制";
-    setTimeout(() => (tip.textContent = old), 1200);
-  } catch (e) {
-    toast(`复制失败：${e.message}`, "bad");
+$("#accountGrid").addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-act]");
+  if (!btn) return;
+  const a = state.accounts.find((x) => x.id === e.target.closest(".account")?.dataset.id);
+  if (!a) return;
+  switch (btn.dataset.act) {
+    case "login": return loginAccount(a, btn);
+    case "check": return checkAccount(a, btn);
+    case "del": return deleteAccount(a);
+    case "plan": return openPlan(a, btn.dataset.plan, btn);
+    case "bind-card": openCardModal(a.id); return;
+    case "manage-cards": setView("cards"); return;
+    default: return;
   }
-}
+});
 
-/* ------------------------------- 事件绑定 ------------------------------- */
-$("#importBtn").addEventListener("click", importAccount);
-$("#rawInput").addEventListener("keydown", (e) => {
-  if ((e.metaKey || e.ctrlKey) && e.key === "Enter") importAccount();
+$("#accountSearch").addEventListener("input", (e) => {
+  state.keyword = e.target.value;
+  renderAccounts();
 });
 $("#refreshBtn").addEventListener("click", async () => {
   await loadAll();
@@ -345,73 +332,320 @@ $("#refreshBtn").addEventListener("click", async () => {
 $("#startBrowserBtn").addEventListener("click", async () => {
   try {
     toast("正在启动浏览器…");
-    const data = await api("/api/browser/start", { method: "POST" });
-    state.status = data.status;
+    state.status = (await api("/api/browser/start", { method: "POST" })).status;
     renderStatus();
     toast("浏览器已就绪", "ok");
+  } catch (e) { toast(e.message, "bad"); }
+});
+
+/* ------------------------------- 导入 ------------------------------- */
+const ADMIN_URL = location.origin;
+const BOOKMARKLET =
+  "javascript:(async()=>{try{const d=await(await fetch('/api/auth/session',{cache:'no-store'})).json();" +
+  "if(!d||!d.accessToken){alert('当前页面没有登录态');return}" +
+  "const s=btoa(unescape(encodeURIComponent(JSON.stringify(d))));" +
+  "location.href='" + ADMIN_URL + "/#import='+encodeURIComponent(s)}" +
+  "catch(e){alert('导入失败：'+e)}})()";
+
+$("#bookmarklet").setAttribute("href", BOOKMARKLET);
+$("#copyBookmarklet").addEventListener("click", async () => {
+  try {
+    await navigator.clipboard.writeText(BOOKMARKLET);
+    toast("书签脚本已复制", "ok");
   } catch (e) {
-    toast(e.message, "bad");
+    prompt("手动复制：", BOOKMARKLET);
   }
 });
-$("#search").addEventListener("input", (e) => {
-  state.keyword = e.target.value;
-  render();
-});
-$("#drawerClose").addEventListener("click", () => {
-  $("#drawer").classList.remove("open");
-  $("#drawer").setAttribute("aria-hidden", "true");
-});
 
-$("#accounts").addEventListener("click", (e) => {
-  const btn = e.target.closest("[data-act]");
-  if (!btn) return;
-  const card = e.target.closest(".card");
-  const acc = state.accounts.find((a) => a.id === card?.dataset.id);
-  if (!acc) return;
-  const act = btn.dataset.act;
-
-  if (act === "copy") return copyToken(acc, btn.dataset.type, btn);
-  if (act === "login") return loginAccount(acc.id, btn);
-  if (act === "plan") return openPlan(acc, btn.dataset.plan, btn);
-  if (act === "check") return checkAccount(acc.id, btn);
-  if (act === "del") return deleteAccount(acc.id, acc);
-});
-
-document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") $("#drawerClose").click();
-});
-
-/* ------------------------------- 结账 & 卡信息 ------------------------------- */
-function setCoState(text, kind = "") {
-  const el = $("#coState");
-  el.textContent = text;
-  el.className = "co-state" + (kind ? " " + kind : "");
+async function importAccounts() {
+  const raw = $("#rawInput").value.trim();
+  if (!raw) return toast("先粘贴 token", "bad");
+  const alias = $("#aliasInput").value.trim();
+  const btn = $("#importBtn");
+  busy(btn, true);
+  $("#importLog").innerHTML = "";
+  try {
+    const d = await api("/api/accounts", {
+      method: "POST",
+      body: JSON.stringify({ raw, alias }),
+    });
+    const results = d.results || [];
+    const ok = results.filter((r) => r.ok).length;
+    $("#importLog").innerHTML = results.map((r) => r.ok
+      ? `<div class="ok">✓ 已导入 ${esc(r.account.email)}（${esc(r.account.planLabel)}）</div>`
+      : `<div class="bad">✗ ${esc(r.error || "未知错误")}</div>`).join("");
+    if (ok) {
+      $("#rawInput").value = "";
+      $("#aliasInput").value = "";
+      toast(`导入 ${ok} 个账号`, "ok");
+      await loadAll();
+      setView("accounts");
+    } else {
+      toast("导入失败，检查 token 是否完整", "bad");
+    }
+  } catch (e) {
+    toast(e.message, "bad");
+    $("#importLog").innerHTML = `<div class="bad">✗ ${esc(e.message)}</div>`;
+  } finally {
+    busy(btn, false);
+  }
 }
 
-async function goCheckout() {
-  const acc = state.currentAcc;
-  const plan = state.currentPlan;
-  if (!acc || !plan) return toast("先从卡片上选 Plus / Pro", "bad");
+$("#importBtn").addEventListener("click", importAccounts);
+$("#rawInput").addEventListener("keydown", (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key === "Enter") importAccounts();
+});
 
-  const btn = $("#goCheckoutBtn");
+/* ------------------------------- 卡库 ------------------------------- */
+function openCardModal(accountId) {
+  $("#cardModal").classList.remove("hidden");
+  $("#scrim").classList.add("on");
+  $("#newAccounts").innerHTML = state.accounts.length
+    ? state.accounts.map((a) =>
+        `<label><input type="checkbox" value="${esc(a.id)}"
+          ${accountId === a.id ? "checked" : ""}> ${esc(a.email)}</label>`).join("")
+    : `<div class="muted small" style="padding:8px">还没有账号</div>`;
+  setTimeout(() => $("#newNumber").focus(), 60);
+}
+
+function closeCardModal() {
+  $("#cardModal").classList.add("hidden");
+  $("#scrim").classList.remove("on");
+}
+
+$("#addCardBtn").addEventListener("click", () => openCardModal());
+$("#addCardBtn2").addEventListener("click", () => openCardModal());
+$("#cardModalClose").addEventListener("click", closeCardModal);
+$("#cardCancel").addEventListener("click", closeCardModal);
+$("#scrim").addEventListener("click", closeCardModal);
+
+function luhnOk(num) {
+  const d = [...num].map(Number);
+  if (d.length < 12) return false;
+  let sum = 0;
+  d.reverse().forEach((v, i) => {
+    if (i % 2) { v *= 2; if (v > 9) v -= 9; }
+    sum += v;
+  });
+  return sum % 10 === 0;
+}
+
+function brandOf(num) {
+  if (/^4/.test(num)) return "VISA";
+  if (/^(5[1-5]|2(2[2-9]|[3-6]\d|7[01]|720))/.test(num)) return "MASTERCARD";
+  if (/^3[47]/.test(num)) return "AMEX";
+  if (/^35/.test(num)) return "JCB";
+  if (/^(62|81)/.test(num)) return "UNIONPAY";
+  return "CARD";
+}
+
+function updatePreview() {
+  const num = $("#newNumber").value.replace(/\D/g, "");
+  $("#cpNum").textContent = num
+    ? num.replace(/(.{4})/g, "$1 ").trim().padEnd(19, "•")
+    : "•••• •••• •••• ••••";
+  $("#cpBrand").textContent = brandOf(num);
+  $("#cpExp").textContent = $("#newExp").value || "MM/YY";
+  $("#cpHolder").textContent = $("#newHolder").value || "持卡人";
+
+  const hint = $("#luhnHint");
+  if (num.length >= 12) {
+    const ok = luhnOk(num);
+    hint.textContent = ok ? "✓ 卡号校验通过" : "✗ 卡号校验失败，检查是否输错";
+    hint.className = `hint ${ok ? "ok" : "bad"}`;
+  } else {
+    hint.textContent = "";
+    hint.className = "hint";
+  }
+}
+
+$$("#newNumber, #newExp, #newHolder").forEach((el) => el.addEventListener("input", updatePreview));
+$("#newNumber").addEventListener("input", (e) => {
+  const d = e.target.value.replace(/\D/g, "").slice(0, 19);
+  e.target.value = d.replace(/(.{4})/g, "$1 ").trim();
+  updatePreview();
+});
+$("#newExp").addEventListener("input", (e) => {
+  const d = e.target.value.replace(/\D/g, "").slice(0, 4);
+  e.target.value = d.length > 2 ? `${d.slice(0, 2)}/${d.slice(2)}` : d;
+  updatePreview();
+});
+$("#newCvc").addEventListener("input", (e) => {
+  e.target.value = e.target.value.replace(/\D/g, "").slice(0, 4);
+});
+
+$("#cardSave").addEventListener("click", async () => {
+  const payload = {
+    number: $("#newNumber").value,
+    exp: $("#newExp").value,
+    cvc: $("#newCvc").value,
+    holder: $("#newHolder").value.trim(),
+    country: $("#newCountry").value,
+    postal: $("#newPostal").value.trim(),
+    state: $("#newState").value.trim(),
+    city: $("#newCity").value.trim(),
+    line1: $("#newLine1").value.trim(),
+    label: $("#newLabel").value.trim(),
+    accountIds: [...document.querySelectorAll("#newAccounts input:checked")].map((x) => x.value),
+  };
+  if (!payload.number.replace(/\D/g, "") || !payload.exp || !payload.cvc) {
+    return toast("卡号 / 有效期 / 安全码必填", "bad");
+  }
+  const btn = $("#cardSave");
   busy(btn, true);
-  $("#shotLoading").classList.remove("hidden");
-  $("#shotLoading").textContent = "正在进入付款页…";
   try {
-    const data = await api(`/api/accounts/${encodeURIComponent(acc.id)}/checkout`, {
+    await api("/api/cards", { method: "POST", body: JSON.stringify(payload) });
+    toast("已保存到卡库", "ok");
+    closeCardModal();
+    $$("#newNumber, #newExp, #newCvc, #newHolder, #newPostal, #newState, #newCity, #newLine1, #newLabel")
+      .forEach((el) => (el.value = ""));
+    updatePreview();
+    await loadAll();
+    setView("cards");
+  } catch (e) {
+    toast(e.message, "bad");
+  } finally {
+    busy(btn, false);
+  }
+});
+
+$("#cardList").addEventListener("change", async (e) => {
+  const box = e.target.closest("[data-bindacc]");
+  if (!box) return;
+  const cardId = box.dataset.bindacc;
+  const ids = [...document.querySelectorAll(`[data-bindacc="${cardId}"]`)]
+    .filter((x) => x.checked).map((x) => x.value);
+  try {
+    await api(`/api/cards/${encodeURIComponent(cardId)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ accountIds: ids }),
+    });
+    toast(box.checked ? "已绑定账号" : "已解绑", "ok");
+    await loadAll();
+  } catch (err) {
+    toast(err.message, "bad");
+  }
+});
+
+$("#cardList").addEventListener("click", async (e) => {
+  const btn = e.target.closest("[data-act]");
+  if (!btn) return;
+  const id = btn.dataset.id;
+  if (btn.dataset.act === "del-card") {
+    if (!confirm("从卡库删除这张卡？")) return;
+    try {
+      await api(`/api/cards/${encodeURIComponent(id)}`, { method: "DELETE" });
+      toast("已删除", "ok");
+      await loadAll();
+    } catch (err) { toast(err.message, "bad"); }
+  }
+  if (btn.dataset.act === "unbind") {
+    try {
+      await api(`/api/cards/${encodeURIComponent(id)}`, {
+        method: "PATCH", body: JSON.stringify({ unbindAccountId: btn.dataset.acc }),
+      });
+      toast("已解绑", "ok");
+      await loadAll();
+    } catch (err) { toast(err.message, "bad"); }
+    return;
+  }
+  if (btn.dataset.act === "copy-code") {
+    try {
+      await navigator.clipboard.writeText(btn.dataset.code || "");
+      toast("兑换码已复制", "ok");
+    } catch (err) { toast("复制失败", "bad"); }
+    return;
+  }
+  if (btn.dataset.act === "rotate-code") {
+    if (!confirm("重置后旧兑换码立即失效，继续？")) return;
+    try {
+      await api(`/api/cards/${encodeURIComponent(id)}/rotate-code`, { method: "POST" });
+      toast("已生成新兑换码", "ok");
+      await loadAll();
+    } catch (err) { toast(err.message, "bad"); }
+    return;
+  }
+  if (btn.dataset.act === "copy-card") {
+    try {
+      const d = await api(`/api/cards/${encodeURIComponent(id)}/reveal`, { method: "POST" });
+      await navigator.clipboard.writeText(`${d.number}\t${d.exp}\t${d.cvc}`);
+      toast("已复制：卡号 · 有效期 · CVC", "ok");
+    } catch (err) { toast(err.message, "bad"); }
+  }
+});
+
+/* ------------------------------- 订阅抽屉 ------------------------------- */
+function steps(active) {
+  $$(".step").forEach((el) => {
+    const n = Number(el.dataset.step);
+    el.classList.toggle("active", n === active);
+    el.classList.toggle("done", n < active);
+  });
+}
+
+function openDrawer() {
+  $("#drawer").classList.add("open");
+  $("#drawer").setAttribute("aria-hidden", "false");
+}
+
+function closeDrawer() {
+  $("#drawer").classList.remove("open");
+  $("#drawer").setAttribute("aria-hidden", "true");
+}
+
+$("#drawerClose").addEventListener("click", closeDrawer);
+
+function vaultOptions(accountId) {
+  const own = state.cards.filter((c) => !c.accountId || c.accountId === accountId);
+  if (!own.length) return `<option value="">卡库为空，先去添加</option>`;
+  return `<option value="">手动输入</option>` + own.map((c) =>
+    `<option value="${esc(c.id)}" data-addr='${esc(JSON.stringify({
+      holder: c.holder, country: c.country, postal: c.postal,
+      state: c.state, city: c.city, line1: c.line1,
+    }))}'>${esc(c.brand)} ···· ${esc(c.last4)}${c.label ? " · " + esc(c.label) : ""}</option>`
+  ).join("");
+}
+
+async function openPlan(a, plan, btn) {
+  state.acc = a;
+  state.plan = plan;
+  state.cardId = null;
+
+  openDrawer();
+  steps(1);
+  $("#drawerKicker").textContent = plan.toUpperCase();
+  $("#drawerTitle").textContent = plan === "plus" ? "Plus 订阅" : "Pro 订阅";
+  $("#drawerSub").textContent = `${a.email} · 正在打开订阅页`;
+  $("#priceRow").innerHTML = "";
+  $("#drawerShot").removeAttribute("src");
+  $("#shotLoading").classList.remove("hidden");
+  $("#shotLoading").textContent = "正在打开订阅弹窗…";
+  $("#checkoutBox").classList.add("hidden");
+  $("#stagePlan").classList.remove("hidden");
+  $("#coAmount").textContent = "—";
+  $("#coState").className = "pill-state";
+  $("#coState").textContent = "等待填写";
+  $("#submitBtn").disabled = true;
+  $("#vaultCard").innerHTML = vaultOptions(a.id);
+
+  busy(btn, true);
+  try {
+    const d = await api(`/api/accounts/${encodeURIComponent(a.id)}/plan`, {
       method: "POST",
       body: JSON.stringify({ plan }),
     });
-    if (data.screenshotUrl) $("#drawerShot").src = data.screenshotUrl;
-    $("#shotLoading").classList.add("hidden");
-    $("#coAmount").textContent = data.amount || "—";
-    $("#stagePlan").classList.add("hidden");
-    $("#planNote").classList.add("hidden");
-    $("#checkoutBox").classList.remove("hidden");
-    $("#drawerSub").textContent = `${data.email || acc.email} · 已进入付款页`;
-    setCoState(data.ready ? "卡信息字段已就绪" : "结账页仍在加载", data.ready ? "ok" : "");
-    if (data.ready) $("#cardNumber").focus();
-    toast(data.ready ? "付款页已就绪，填写卡信息" : "付款页还在加载，稍后再试", data.ready ? "ok" : "bad");
+    const tags = [];
+    if (d.price) tags.push(`<span class="price-tag">参考价 <b>${esc(d.price)}</b>/月</span>`);
+    if (d.cta) tags.push(`<span class="price-tag">按钮 <b>${esc(d.cta)}</b></span>`);
+    tags.push(`<span class="price-tag">已选中 <b>${plan === "plus" ? "Plus" : "Pro"}</b></span>`);
+    $("#priceRow").innerHTML = tags.join("");
+
+    const img = new Image();
+    img.onload = () => $("#shotLoading").classList.add("hidden");
+    img.src = d.screenshotUrl;
+    $("#drawerShot").src = d.screenshotUrl;
+    $("#drawerSub").textContent = `${d.email || a.email} · 订阅弹窗已打开`;
+    toast(`${plan === "plus" ? "Plus" : "Pro"} 已选中`, "ok");
     await loadAll();
   } catch (e) {
     $("#shotLoading").textContent = e.message;
@@ -421,142 +655,224 @@ async function goCheckout() {
   }
 }
 
-async function fillCard() {
-  const acc = state.currentAcc;
+$("#goCheckoutBtn").addEventListener("click", async () => {
+  const { acc, plan } = state;
   if (!acc) return;
-  const number = $("#cardNumber").value.replace(/\D/g, "");
-  const exp = $("#cardExp").value.replace(/\D/g, "");
-  const cvc = $("#cardCvc").value.replace(/\D/g, "");
+  const btn = $("#goCheckoutBtn");
+  busy(btn, true);
+  $("#shotLoading").classList.remove("hidden");
+  $("#shotLoading").textContent = "正在进入付款页…";
+  try {
+    const d = await api(`/api/accounts/${encodeURIComponent(acc.id)}/checkout`, {
+      method: "POST",
+      body: JSON.stringify({ plan }),
+    });
+    if (d.screenshotUrl) $("#drawerShot").src = d.screenshotUrl;
+    $("#shotLoading").classList.add("hidden");
 
-  if (number.length < 13) return toast("卡号不完整", "bad");
-  if (exp.length !== 4) return toast("有效期请填 MM/YY", "bad");
-  if (cvc.length < 3) return toast("安全码不完整", "bad");
+    if (!d.ok || !d.url) {
+      $("#coState").className = "pill-state bad";
+      $("#coState").textContent = "没进入付款页";
+      $("#coAmount").textContent = "—";
+      toast("没进入付款页：可能已经是当前套餐，或按钮不是购买按钮", "bad");
+      return;
+    }
 
+    $("#coAmount").textContent = d.amount || "—";
+    $("#stagePlan").classList.add("hidden");
+    $("#checkoutBox").classList.remove("hidden");
+    steps(2);
+    $("#coState").className = "pill-state " + (d.ready ? "ok" : "");
+    $("#coState").textContent = d.ready ? "卡信息字段就绪" : "页面仍在加载";
+    $("#drawerSub").textContent = `${d.email || acc.email} · 已进入付款页`;
+    toast(d.ready ? "付款页就绪" : "付款页还在加载", d.ready ? "ok" : "bad");
+    await loadAll();
+  } catch (e) {
+    $("#shotLoading").textContent = e.message;
+    toast(e.message, "bad");
+  } finally {
+    busy(btn, false);
+  }
+});
+
+$("#vaultCard").addEventListener("change", (e) => {
+  const opt = e.target.selectedOptions[0];
+  state.cardId = e.target.value || null;
+  $("#manualCard").open = !state.cardId;
+  if (!state.cardId) return;
+  try {
+    const addr = JSON.parse(opt.dataset.addr || "{}");
+    if (addr.holder) $("#addrName").value = addr.holder;
+    if (addr.country) $("#addrCountry").value = addr.country;
+    if (addr.postal) $("#addrPostal").value = addr.postal;
+    if (addr.state) $("#addrState").value = addr.state;
+    if (addr.city) $("#addrCity").value = addr.city;
+    if (addr.line1) $("#addrLine1").value = addr.line1;
+  } catch (err) { /* ignore */ }
+  $("#vaultHint").textContent = "已选卡，账单地址会自动带出。";
+});
+
+$("#fillCardBtn").addEventListener("click", async () => {
+  const acc = state.acc;
+  if (!acc) return;
+  let payload;
+  if (state.cardId) {
+    payload = { cardId: state.cardId };
+  } else {
+    const number = $("#cardNumber").value.replace(/\D/g, "");
+    const exp = $("#cardExp").value.replace(/\D/g, "");
+    const cvc = $("#cardCvc").value.replace(/\D/g, "");
+    if (number.length < 13) return toast("卡号不完整", "bad");
+    if (exp.length !== 4) return toast("有效期填 MM/YY", "bad");
+    if (cvc.length < 3) return toast("安全码不完整", "bad");
+    payload = { number, exp, cvc };
+  }
   const btn = $("#fillCardBtn");
   busy(btn, true);
   try {
-    const data = await api(`/api/accounts/${encodeURIComponent(acc.id)}/card`, {
-      method: "POST",
-      body: JSON.stringify({ number, exp, cvc }),
+    const d = await api(`/api/accounts/${encodeURIComponent(acc.id)}/card`, {
+      method: "POST", body: JSON.stringify(payload),
     });
-    setCoState(`已填入 ${data.count} 项 · ${data.fields.number}`, data.count === 3 ? "ok" : "bad");
-    $("#submitBtn").disabled = data.count !== 3;
-    toast("卡信息已填入浏览器，请核对后提交", "ok");
+    $("#coState").className = "pill-state ok";
+    $("#coState").textContent = `已填入 ${d.count} 项 · ${d.fields.number}`;
+    $("#submitBtn").disabled = d.count !== 3;
+    toast("卡信息已填入浏览器", "ok");
   } catch (e) {
-    setCoState("填充失败", "bad");
+    $("#coState").className = "pill-state bad";
+    $("#coState").textContent = "填充失败";
     toast(e.message, "bad");
   } finally {
     busy(btn, false);
   }
-}
+});
 
-async function submitCheckout() {
-  const acc = state.currentAcc;
+$("#revealBtn").addEventListener("click", async () => {
+  const acc = state.acc;
+  if (!acc) return;
+  const btn = $("#revealBtn");
+  busy(btn, true);
+  try {
+    const d = await api(`/api/accounts/${encodeURIComponent(acc.id)}/reveal`, { method: "POST" });
+    if (d.screenshotUrl) $("#drawerShot").src = d.screenshotUrl;
+    $("#coState").className = "pill-state " + (d.revealed ? "ok" : "bad");
+    $("#coState").textContent = d.revealed ? "账单地址已展开" : "未展开";
+    toast(d.revealed ? "地址区块已展开" : "没检测到地址区块", d.revealed ? "ok" : "bad");
+  } catch (e) {
+    toast(e.message, "bad");
+  } finally {
+    busy(btn, false);
+  }
+});
+
+$("#fillAddrBtn").addEventListener("click", async () => {
+  const acc = state.acc;
+  if (!acc) return;
+  const body = state.cardId
+    ? { cardId: state.cardId }
+    : {
+        name: $("#addrName").value.trim(),
+        country: $("#addrCountry").value,
+        postal: $("#addrPostal").value.trim(),
+        state: $("#addrState").value.trim(),
+        city: $("#addrCity").value.trim(),
+        line1: $("#addrLine1").value.trim(),
+      };
+  const btn = $("#fillAddrBtn");
+  busy(btn, true);
+  try {
+    const d = await api(`/api/accounts/${encodeURIComponent(acc.id)}/address`, {
+      method: "POST", body: JSON.stringify(body),
+    });
+    if (d.screenshotUrl) $("#drawerShot").src = d.screenshotUrl;
+    const n = Object.values(d.values || {}).filter(Boolean).length;
+    $("#coState").className = "pill-state ok";
+    $("#coState").textContent = `地址已填 ${n} 项`;
+    toast("账单地址已填入", "ok");
+  } catch (e) {
+    $("#coState").className = "pill-state bad";
+    $("#coState").textContent = "地址填写失败";
+    toast(e.message, "bad");
+  } finally {
+    busy(btn, false);
+  }
+});
+
+$("#submitBtn").addEventListener("click", async () => {
+  const acc = state.acc;
   if (!acc) return;
   const amount = $("#coAmount").textContent.trim();
-  const ok = confirm(
-    `确认提交订阅？\n\n账号：${acc.email}\n金额：${amount}\n\n` +
-    `点击「确定」会真实扣款，无法撤回。`
-  );
-  if (!ok) return;
-
+  if (!confirm(`确认提交订阅？\n\n账号：${acc.email}\n金额：${amount}\n\n点击确定会真实扣款，无法撤回。`)) return;
   const btn = $("#submitBtn");
   busy(btn, true);
-  setCoState("提交中…");
+  steps(3);
+  $("#coState").className = "pill-state";
+  $("#coState").textContent = "提交中…";
   try {
-    const data = await api(`/api/accounts/${encodeURIComponent(acc.id)}/subscribe`, {
-      method: "POST",
-      body: JSON.stringify({ confirm: true }),
+    const d = await api(`/api/accounts/${encodeURIComponent(acc.id)}/subscribe`, {
+      method: "POST", body: JSON.stringify({ confirm: true }),
     });
-    const done = !data.pending;
-    setCoState(done ? "已提交，见窗口提示" : "等待银行/验证处理", done ? "ok" : "");
-    $("#drawerSub").textContent = `${acc.email} · ${data.url || ""}`.slice(0, 90);
-    toast(done ? "已提交，去窗口确认结果" : "已提交，可能需要 3DS 验证", done ? "ok" : "");
-    if (data.text) console.info("[subscribe]", data.text.slice(0, 300));
+    const done = !d.pending;
+    $("#coState").className = "pill-state " + (done ? "ok" : "");
+    $("#coState").textContent = done ? "已提交" : "等待验证";
+    const firstLine = (d.text || "").split("\n").filter(Boolean)[0] || "";
+    toast(done ? `已提交：${firstLine.slice(0, 40)}` : "已提交，可能需要 3DS", done ? "ok" : "");
     await loadAll();
   } catch (e) {
-    setCoState("提交失败", "bad");
+    $("#coState").className = "pill-state bad";
+    $("#coState").textContent = "提交失败";
     toast(e.message, "bad");
   } finally {
     busy(btn, false);
   }
-}
+});
 
-$("#goCheckoutBtn").addEventListener("click", goCheckout);
-$("#fillCardBtn").addEventListener("click", fillCard);
-$("#submitBtn").addEventListener("click", submitCheckout);
-
-/* 卡号/有效期格式化（只影响输入框显示） */
 $("#cardNumber").addEventListener("input", (e) => {
   const d = e.target.value.replace(/\D/g, "").slice(0, 19);
   e.target.value = d.replace(/(.{4})/g, "$1 ").trim();
 });
 $("#cardExp").addEventListener("input", (e) => {
   const d = e.target.value.replace(/\D/g, "").slice(0, 4);
-  e.target.value = d.length > 2 ? d.slice(0, 2) + "/" + d.slice(2) : d;
+  e.target.value = d.length > 2 ? `${d.slice(0, 2)}/${d.slice(2)}` : d;
 });
 $("#cardCvc").addEventListener("input", (e) => {
   e.target.value = e.target.value.replace(/\D/g, "").slice(0, 4);
 });
 
-/* ------------------------------- 账单地址 ------------------------------- */
-async function revealBilling() {
-  const acc = state.currentAcc;
-  if (!acc) return;
-  const btn = $("#revealBtn");
-  busy(btn, true);
-  try {
-    const data = await api(`/api/accounts/${encodeURIComponent(acc.id)}/reveal`, { method: "POST" });
-    if (data.screenshotUrl) $("#drawerShot").src = data.screenshotUrl;
-    setCoState(data.revealed ? "账单地址已展开" : "没展开，检查页面", data.revealed ? "ok" : "bad");
-    toast(data.revealed ? "账单地址区块已展开，去填写" : "没检测到地址区块", data.revealed ? "ok" : "bad");
-  } catch (e) {
-    toast(e.message, "bad");
-  } finally {
-    busy(btn, false);
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") {
+    if (!$("#cardModal").classList.contains("hidden")) closeCardModal();
+    else closeDrawer();
   }
-}
+});
 
-async function fillAddress() {
-  const acc = state.currentAcc;
-  if (!acc) return;
-  const body = {
-    name: $("#addrName").value.trim(),
-    country: $("#addrCountry").value,
-    postal: $("#addrPostal").value.trim(),
-    state: $("#addrState").value.trim(),
-    city: $("#addrCity").value.trim(),
-    line1: $("#addrLine1").value.trim(),
-  };
-  if (!body.name) return toast("填持卡人姓名", "bad");
-  if (!body.postal) return toast("填邮编", "bad");
-  if (!body.line1) return toast("填地址", "bad");
-
-  const btn = $("#fillAddrBtn");
-  busy(btn, true);
+/* ------------------------------- 书签回传 ------------------------------- */
+async function consumeHashImport() {
+  const h = location.hash || "";
+  if (!h.startsWith("#import=")) return false;
+  history.replaceState(null, "", location.pathname);
   try {
-    const data = await api(`/api/accounts/${encodeURIComponent(acc.id)}/address`, {
+    const b64 = decodeURIComponent(h.slice(8));
+    const raw = decodeURIComponent(escape(atob(b64)));
+    const d = await api("/api/import-session", {
       method: "POST",
-      body: JSON.stringify(body),
+      body: JSON.stringify({ raw }),
     });
-    if (data.screenshotUrl) $("#drawerShot").src = data.screenshotUrl;
-    const filled = Object.values(data.values || {}).filter(Boolean).length;
-    setCoState(`地址已填 ${filled} 项`, "ok");
-    toast("账单地址已填入，确认无误后提交订阅", "ok");
+    if (d.ok && d.imported?.length) {
+      toast(`书签导入成功：${d.imported[0].email}`, "ok");
+      await loadAll();
+      setView("accounts");
+    } else {
+      toast(d.error || "导入失败", "bad");
+    }
   } catch (e) {
-    setCoState("地址填写失败", "bad");
-    toast(e.message, "bad");
-  } finally {
-    busy(btn, false);
+    toast(`导入失败：${e.message}`, "bad");
   }
+  return true;
 }
-
-$("#revealBtn").addEventListener("click", revealBilling);
-$("#fillAddrBtn").addEventListener("click", fillAddress);
 
 /* ------------------------------- 启动 ------------------------------- */
+consumeHashImport().catch(() => {});
+window.addEventListener("hashchange", () => consumeHashImport().catch(() => {}));
 loadAll().catch((e) => toast(`加载失败：${e.message}`, "bad"));
 setInterval(refreshStatus, 15000);
-setInterval(() => {
-  if (state.accounts.length) render();
-}, 60000);
+setInterval(() => { renderAccounts(); }, 60000);

@@ -1,7 +1,16 @@
+# 运行时数据（含 token / 卡号 / 密码，绝不入库）
 data/
 .chrome-gpt-profile/
 __pycache__/
-chrome.log
-server.log
+*.pyc
+
+# 会话导出与原始 token 文件
+新建文本文档.txt
+doc/
+
+# 日志
+*.log
+
+# 图片：只保留 docs 下的文档截图
 *.png
 !docs/*.png

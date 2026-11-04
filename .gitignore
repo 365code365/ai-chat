@@ -1,0 +1,7 @@
+data/
+.chrome-gpt-profile/
+__pycache__/
+chrome.log
+server.log
+*.png
+!docs/*.png

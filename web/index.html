@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ChatGPT 账号管理台</title>
+<link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <div class="logo">
+      <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8">
+        <path d="M12 3l7 4v10l-7 4-7-4V7z" stroke-linejoin="round"/>
+        <circle cx="12" cy="12" r="2.4"/>
+      </svg>
+    </div>
+    <div class="brand-text">
+      <h1>ChatGPT 账号管理台</h1>
+      <p>本地运行 · 只监听 127.0.0.1 · token 只存在本机</p>
+    </div>
+  </div>
+  <div class="top-right">
+    <div class="pill" id="browserPill" title="独立 Chrome 实例状态">
+      <span class="dot" id="browserDot"></span>
+      <span id="browserText">浏览器未启动</span>
+    </div>
+    <button class="btn ghost" id="startBrowserBtn">启动浏览器</button>
+    <button class="btn ghost" id="refreshBtn">
+      <span class="spin-ico">⟳</span> 刷新
+    </button>
+  </div>
+</header>
+
+<main>
+  <section class="panel import-panel">
+    <div class="panel-head">
+      <h2>导入账号</h2>
+      <span class="hint">粘贴完整导出 JSON，或只贴 <code>accessToken</code>（可一次贴多行）</span>
+    </div>
+    <textarea id="rawInput" spellcheck="false" rows="5"
+      placeholder='{"WARNING_BANNER":"...","accessToken":"eyJhbGciOi...","sessionToken":"..."}'></textarea>
+    <div class="import-row">
+      <input id="aliasInput" placeholder="备注（可选）：主号 / 客户A / 第 3 单" />
+      <button class="btn primary" id="importBtn">解析并导入</button>
+    </div>
+    <div class="import-log" id="importLog"></div>
+  </section>
+
+  <section class="list-head">
+    <h2>账号 <span class="count" id="count">0</span></h2>
+    <div class="list-tools">
+      <input id="search" placeholder="搜索邮箱 / 备注" />
+    </div>
+  </section>
+
+  <div id="accounts" class="grid"></div>
+  <div id="empty" class="empty">
+    <div class="empty-ico">◎</div>
+    <p>还没有账号，先在上面粘贴 token 导入。</p>
+  </div>
+</main>
+
+<aside class="drawer" id="drawer" aria-hidden="true">
+  <div class="drawer-head">
+    <div>
+      <h3 id="drawerTitle">订阅页</h3>
+      <p id="drawerSub" class="drawer-sub"></p>
+    </div>
+    <button class="btn ghost small" id="drawerClose">关闭</button>
+  </div>
+  <div class="drawer-body">
+    <div class="price-row" id="priceRow"></div>
+    <div class="shot-wrap">
+      <img id="drawerShot" alt="订阅页截图" />
+      <div class="shot-loading" id="shotLoading">正在打开订阅页…</div>
+    </div>
+
+    <div class="stage-actions" id="stagePlan">
+      <button class="btn primary block" id="goCheckoutBtn">去结账 · 进入付款页</button>
+    </div>
+
+    <div class="checkout-box hidden" id="checkoutBox">
+      <div class="co-head">
+        <div>
+          <div class="co-label">今日应付</div>
+          <div class="co-amount" id="coAmount">—</div>
+        </div>
+        <span class="co-state" id="coState">等待填写卡信息</span>
+      </div>
+
+      <div class="card-form">
+        <label class="field">
+          <span>卡号</span>
+          <input id="cardNumber" inputmode="numeric" autocomplete="off"
+                 placeholder="1234 1234 1234 1234" maxlength="23" />
+        </label>
+        <div class="field-row">
+          <label class="field">
+            <span>有效期</span>
+            <input id="cardExp" inputmode="numeric" autocomplete="off" placeholder="MM/YY" maxlength="5" />
+          </label>
+          <label class="field">
+            <span>安全码</span>
+            <input id="cardCvc" inputmode="numeric" autocomplete="off" placeholder="CVC" maxlength="4" />
+          </label>
+        </div>
+      </div>
+
+      <div class="stage-actions">
+        <button class="btn" id="fillCardBtn">填入结账页</button>
+      </div>
+
+      <div class="addr-form" id="addrForm">
+        <div class="addr-title">账单地址<span>Stripe 提交前会要求</span></div>
+        <label class="field">
+          <span>持卡人姓名</span>
+          <input id="addrName" autocomplete="off" placeholder="CHENGBING LI" />
+        </label>
+        <div class="field-row">
+          <label class="field">
+            <span>国家 / 地区</span>
+            <select id="addrCountry" class="sel">
+              <option value="JP">日本 JP</option>
+              <option value="US">美国 US</option>
+              <option value="CN">中国 CN</option>
+              <option value="HK">中国香港 HK</option>
+              <option value="TW">中国台湾 TW</option>
+              <option value="SG">新加坡 SG</option>
+              <option value="GB">英国 GB</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>邮编</span>
+            <input id="addrPostal" autocomplete="off" placeholder="100-0001" />
+          </label>
+        </div>
+        <div class="field-row">
+          <label class="field">
+            <span>都道府县 / 州</span>
+            <input id="addrState" autocomplete="off" placeholder="Tokyo" />
+          </label>
+          <label class="field">
+            <span>城市</span>
+            <input id="addrCity" autocomplete="off" placeholder="Chiyoda" />
+          </label>
+        </div>
+        <label class="field">
+          <span>地址</span>
+          <input id="addrLine1" autocomplete="off" placeholder="1-1-1 Chiyoda" />
+        </label>
+        <div class="stage-actions">
+          <button class="btn" id="revealBtn">展开账单地址</button>
+          <button class="btn" id="fillAddrBtn">填入账单地址</button>
+        </div>
+      </div>
+
+      <div class="stage-actions">
+        <button class="btn danger block" id="submitBtn" disabled>提交订阅</button>
+      </div>
+
+      <p class="drawer-note danger-note">
+        点「提交订阅」就是<b>真实扣款</b>，请先核对右上金额。卡信息只存在这个页面内存里，不落盘、不回传截图。
+        若出现人机验证或 3D Secure，请到弹出的 Chrome 窗口里手动完成。
+      </p>
+    </div>
+
+    <p class="drawer-note" id="planNote">
+      套餐已在浏览器里选中，<b>付款请在弹出的 Chrome 窗口里自己确认</b>，管理台不会代付。
+    </p>
+  </div>
+</aside>
+
+<div class="toasts" id="toasts"></div>
+<script src="/app.js"></script>
+</body>
+</html>

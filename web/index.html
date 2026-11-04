@@ -223,8 +223,8 @@
         <div class="panel-title">上游代理</div>
         <div class="field">
           <input id="proxyInput" class="input" spellcheck="false"
-                 placeholder="http://用户名:密码@1.2.3.4:8080  或  socks5://用户名:密码@1.2.3.4:1080" />
-          <em class="hint" id="proxyHint">留空表示直连</em>
+                 placeholder="gate.example.com:1000:用户名:密码   或   http://用户名:密码@1.2.3.4:8080" />
+          <em class="hint" id="proxyHint">支持 host:port:user:pass（代理商格式）/ http(s):// / socks5://；留空=直连</em>
         </div>
         <div class="row gap">
           <button class="btn primary" id="proxySaveBtn">保存</button>

@@ -49,7 +49,11 @@ ADMIN_USER=admin ADMIN_PASSWORD=你的密码 python3 admin_server.py --port 8899
 ```
 
 - Chrome 只在启动时读 `--proxy-server`，所以**第一次启用要点「重启浏览器并应用」**；之后改上游只改配置，中继按连接实时读取，不用再重启
-- 支持 `http://user:pass@host:port`、`https://...`、`socks5://...`，留空即直连
+- 支持三种写法：
+  - `host:port:user:pass`（Kookeey 等代理商格式，默认按 HTTP 代理）
+  - `http://user:pass@host:port` / `https://...`
+  - `socks5://user:pass@host:port`
+- 留空 = 直连
 - 「检测出口 IP」会让中继去请求 ipify，显示真正的出口 IP 和延迟
 - `127.0.0.1` 走 `--proxy-bypass-list=<-loopback>` 直连，不会被代理
 
@@ -58,7 +62,18 @@ python3 proxy_relay.py --port 8898      # 手动起中继（start.sh 会自动�
 ```
 
 > 币种由 IP 区域 + 账号账单地区共同决定；换 IP 后要重新打开订阅页才会刷新价格。
-> 卡国家与 IP 差异过大时 Stripe 可能直接拒付，机房 IP 也更容易被 Cloudflare 挑战。
+> 卡国家与 IP 差异过大时 Stripe 可能直接拒付。
+
+**实测记录（2026-11）**：`gate.kookeey.info:1000` 香港节点可以连通（HTTP 515ms / SOCKS5 435ms，
+出口 119.236.157.37），但访问 chatgpt.com 被直接拦截：
+
+```
+Unable to load site
+Please try again later. If you are using a VPN, try turning it off.
+[IP:119.236.157.37]
+```
+
+结论：机房 IP 会被 ChatGPT 识别为 VPN。要拿地区价，需要住宅/移动出口，且最好与账号账单地区一致。
 
 ## 启动
 

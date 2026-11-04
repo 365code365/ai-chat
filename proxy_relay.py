@@ -53,9 +53,25 @@ def load_upstream():
 
 
 def parse_upstream(upstream):
-    """拆出 scheme / host / port / auth。"""
+    """拆出 scheme / host / port / auth。
+
+    兼容三种写法：
+        1.2.3.4:8080                              无认证
+        1.2.3.4:8080:user:pass                    代理商常见格式（Kookeey 等）
+        http://user:pass@1.2.3.4:8080             URL 形式（也支持 socks5://）
+    """
     if not upstream:
         return None
+    upstream = upstream.strip()
+    if "://" not in upstream:
+        parts = upstream.split(":")
+        if len(parts) == 4:
+            host, port, user, pwd = parts
+            return {"scheme": "http", "host": host, "port": int(port),
+                    "auth": (user, pwd)}
+        if len(parts) == 2 and parts[1].isdigit():
+            return {"scheme": "http", "host": parts[0], "port": int(parts[1]),
+                    "auth": None}
     u = urllib.parse.urlparse(upstream if "://" in upstream else "http://" + upstream)
     scheme = (u.scheme or "http").lower()
     if scheme not in ("http", "https", "socks5", "socks5h"):
@@ -83,6 +99,21 @@ def _recv_until(sock, marker=b"\r\n\r\n", limit=65536):
     return buf
 
 
+def _read_head(sock, limit=65536):
+    """读到头部结束，返回 (头部, 剩余数据)。"""
+    buf = b""
+    sock.settimeout(15)
+    while b"\r\n\r\n" not in buf and len(buf) < limit:
+        chunk = sock.recv(4096)
+        if not chunk:
+            break
+        buf += chunk
+    if b"\r\n\r\n" not in buf:
+        return buf, b""
+    head, _, rest = buf.partition(b"\r\n\r\n")
+    return head, rest
+
+
 def _open_via_http_proxy(up, host, port, tls=False):
     sock = socket.create_connection((up["host"], up["port"]), timeout=20)
     if tls:
@@ -94,12 +125,13 @@ def _open_via_http_proxy(up, host, port, tls=False):
         token = base64.b64encode(("%s:%s" % up["auth"]).encode()).decode()
         lines.append("Proxy-Authorization: Basic " + token)
     sock.sendall(("\r\n".join(lines) + "\r\n\r\n").encode())
-    resp = _recv_until(sock, b"\r\n")
-    if not resp.startswith(b"HTTP/1.") or b" 200" not in resp.split(b"\r\n")[0]:
+    head, rest = _read_head(sock)
+    status = head.split(b"\r\n", 1)[0]
+    if b" 200" not in status:
         sock.close()
-        raise RuntimeError("上游代理拒绝连接: %r" % resp[:80])
-    _recv_until(sock)  # 吃掉剩余头部
-    return sock
+        raise RuntimeError("上游代理拒绝连接: %r" % status[:80])
+    sock.settimeout(60)
+    return sock, rest
 
 
 def _open_via_socks(up, host, port):
@@ -147,7 +179,7 @@ def _open_via_socks(up, host, port):
 def open_target(host, port):
     up = parse_upstream(load_upstream())
     if not up:
-        return socket.create_connection((host, port), timeout=20)
+        return socket.create_connection((host, port), timeout=20), b""
     if up["scheme"].startswith("socks"):
         return _open_via_socks(up, host, port)
     return _open_via_http_proxy(up, host, port, tls=(up["scheme"] == "https"))
@@ -187,8 +219,10 @@ class Handler(socketserver.BaseRequestHandler):
 
             if method.upper() == "CONNECT":
                 host, _, port = target.rpartition(":")
-                upstream = open_target(host.strip("[]"), int(port))
+                upstream, rest = open_target(host.strip("[]"), int(port))
                 client.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                if rest:
+                    client.sendall(rest)
                 _pipe(client, upstream)
                 upstream.close()
                 return
@@ -200,11 +234,11 @@ class Handler(socketserver.BaseRequestHandler):
             u = urllib.parse.urlparse(target)
             port = u.port or (443 if u.scheme == "https" else 80)
             upstream = open_target(u.hostname, port)
-            rest = head.split(b"\r\n", 1)[1] if b"\r\n" in head else b""
+            leftover = head.split(b"\r\n", 1)[1] if b"\r\n" in head else b""
             path = u.path or "/"
             if u.query:
                 path += "?" + u.query
-            upstream.sendall(("%s %s HTTP/1.1\r\n" % (method, path)).encode() + rest)
+            upstream.sendall(("%s %s HTTP/1.1\r\n" % (method, path)).encode() + leftover)
             _pipe(client, upstream)
             upstream.close()
         except Exception:

@@ -737,7 +737,8 @@ class Handler(BaseHTTPRequestHandler):
         if ctype.startswith("text/") or ctype in ("application/javascript",):
             ctype += "; charset=utf-8"
         with open(full, "rb") as f:
-            return self._send(200, f.read(), ctype)
+            return self._send(200, f.read(), ctype,
+                              extra={"Cache-Control": "no-store, must-revalidate"})
 
 
 class ThreadingHTTPServer(socketserver.ThreadingMixIn, HTTPServer):

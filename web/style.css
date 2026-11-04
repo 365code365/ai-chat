@@ -588,3 +588,15 @@ select.input { appearance: none; cursor: pointer; }
 .plan-toggle.on {
   color: #24479e; background: var(--blue-soft); border-color: #cfdcff; font-weight: 600;
 }
+
+/* 复选框不要被 .field input 的 width:100% 拉满 */
+.field input[type="checkbox"],
+.field input[type="radio"] {
+  width: auto;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  accent-color: var(--blue);
+  flex: none;
+}

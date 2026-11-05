@@ -122,8 +122,11 @@ def launch_browser(port, profile, headless=False, log_path=None, extra_args=None
         "--mute-audio",
         "--metrics-recording-only",
         "--no-pings",
-        # 限制 V8 老生代堆和磁盘缓存，避免单个 tab 吃太多
-        "--js-flags=--max-old-space-size=256",
+        # 浏览器是被主动 kill 的，不弹「恢复页面？」
+        "--hide-crash-restore-bubble",
+        # 注意：不要用 --js-flags=--max-old-space-size 限制 V8 堆。ChatGPT 定价页
+        # 需要的 JS 堆超过 256MB，限了会 "V8 javascript OOM" → 页面崩溃（Aw, Snap! 5）。
+        # 只限制磁盘缓存
         "--disk-cache-size=33554432",
         "--media-cache-size=16777216",
     ]

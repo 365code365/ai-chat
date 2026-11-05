@@ -179,7 +179,8 @@ def run_subscribe(job, card, plan, session):
 
         _set_step(job, "login", "running", "正在登录 ChatGPT…")
         _log(job, "导入登录态：%s" % (account["email"] or "未知账号"))
-        email = br.login(account)
+        # 登录直接落在定价页，下一步打开套餐弹窗时不用再整页加载一次
+        email = br.login(account, landing=cgpt.PRICING_URL)
         _log(job, "已登录：%s" % email)
 
         _set_step(job, "plan", "running", "正在打开%s订阅页…" % ("Plus" if plan == "plus" else "Pro"))
@@ -192,12 +193,13 @@ def run_subscribe(job, card, plan, session):
         _set_step(job, "checkout", "running", "正在进入付款页…")
         confirm = r"/立即支付|确认支付|继续前往|Continue/"
         purchase = r"/立即购买|升级至|切换至|订阅|Buy|Upgrade/"
+        on_checkout = lambda: "/checkout/" in (cdp.js("location.href", await_promise=False) or "")
         for _ in range(4):
             hit = cgpt.click_in_dialog(cdp, confirm) or cgpt.click_in_dialog(cdp, purchase) or ""
             if hit:
                 _log(job, "点击：%s" % hit)
-            time.sleep(1.5)
-            if "/checkout/" in (cdp.js("location.href", await_promise=False) or ""):
+            # 最多等 1.5s，进入结账页立即继续（原先固定睡 1.5s）
+            if cgpt.wait_until(on_checkout, timeout=1.5):
                 break
         tab = cgpt.find_checkout_tab(br.port, timeout=150)
         if not tab:

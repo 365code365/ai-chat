@@ -114,21 +114,24 @@ def current_session_email(cdp):
         return ""
 
 
-def login_account(cdp, account, timeout=40):
-    """把账号会话写进浏览器并打开首页，返回校验到的邮箱（失败为空串）。"""
+def login_account(cdp, account, timeout=40, url="https://chatgpt.com/"):
+    """把账号会话写进浏览器并打开 url（默认首页），返回校验到的邮箱（失败为空串）。
+
+    url 可直接给后续要去的页面（如定价页），省掉一次整页加载。
+    """
     cd_exp = account.get("sessionExp") or account.get("expires")
     exp = int(cd_exp) if isinstance(cd_exp, (int, float)) else None
     if not exp:
         exp = int(time.time()) + 30 * 86400
     set_session_cookies(cdp, account["sessionToken"], exp)
-    cdp.call("Page.navigate", url="https://chatgpt.com/")
+    cdp.call("Page.navigate", url=url)
     wait_page_ready(cdp)
     end = time.time() + timeout
     while time.time() < end:
         email = current_session_email(cdp)
         if email:
             return email
-        time.sleep(1.5)
+        time.sleep(0.5)
     return ""
 
 

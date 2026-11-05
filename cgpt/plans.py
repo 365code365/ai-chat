@@ -67,15 +67,18 @@ def open_plan_dialog(cdp, plan, shot_path=None):
     if plan not in ("plus", "pro"):
         raise ValueError("plan 只能是 plus 或 pro")
 
-    cdp.call("Page.navigate", url=PRICING_URL)
-    wait_page_ready(cdp)
+    # 登录时已经落在定价页就不再重复加载
+    here = cdp.js("location.href", await_promise=False) or ""
+    if not here.startswith(PRICING_URL):
+        cdp.call("Page.navigate", url=PRICING_URL)
+        wait_page_ready(cdp)
     wait_for(cdp, "!!document.querySelector('a[href*=\"highlight_plan=\"]')", timeout=20)
 
     url = resolve_plan_link(cdp, plan)
     cdp.call("Page.navigate", url=url)
     wait_page_ready(cdp)
 
-    ok = wait_for(cdp, "!!document.querySelector('[role=\"dialog\"]')", timeout=30, interval=0.8)
+    ok = wait_for(cdp, "!!document.querySelector('[role=\"dialog\"]')", timeout=30, interval=0.4)
     info = {}
     if ok:
         try:
@@ -137,7 +140,7 @@ def find_checkout_tab(port, timeout=150):
         for t in list_targets(port):
             if t.get("type") == "page" and "/checkout/" in t.get("url", ""):
                 return t
-        time.sleep(1)
+        time.sleep(0.4)
     return None
 
 
@@ -151,7 +154,7 @@ def wait_checkout(cdp, timeout=60):
                 return href
         except Exception:
             pass
-        time.sleep(1)
+        time.sleep(0.4)
     return ""
 
 

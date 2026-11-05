@@ -210,9 +210,7 @@ async function doLogin() {
       method: "POST",
       body: JSON.stringify({ user, password, captchaId: captchaState.id, captcha: captchaState.payload }),
     });
-    hideLogin(d.user);
-    await loadAll();
-    if (typeof loadProxy === "function") loadProxy();
+    applyBootstrap(await api("/api/bootstrap"));
     toast("已登录", "ok");
   } catch (e) {
     $("#loginErr").textContent = e.message;
@@ -485,8 +483,7 @@ function renderCards() {
 }
 
 /* ------------------------------- 数据 ------------------------------- */
-async function loadAll() {
-  const [acc, cards] = await Promise.all([api("/api/accounts"), api("/api/cards")]);
+function applyData(acc, cards) {
   state.accounts = acc.accounts || [];
   state.status = acc.status;
   state.cards = cards.cards || [];
@@ -495,7 +492,20 @@ async function loadAll() {
   renderStatus();
 }
 
+async function loadAll() {
+  const [acc, cards] = await Promise.all([api("/api/accounts"), api("/api/cards")]);
+  applyData(acc, cards);
+}
+
+/* 首屏 / 登录后：一次请求拿齐账号、卡库、代理（原先要串行 3 轮） */
+function applyBootstrap(d) {
+  hideLogin(d.user);
+  applyData(d.accounts, d.cards);
+  if (typeof renderProxy === "function" && d.proxy) renderProxy(d.proxy);
+}
+
 async function refreshStatus() {
+  if (document.hidden) return;          // 标签页在后台时不轮询
   try {
     state.status = await api("/api/status");
     renderStatus();
@@ -1255,12 +1265,15 @@ document.addEventListener("keydown", (e) => {
 });
 
 /* ------------------------------- 代理 ------------------------------- */
+function renderProxy(d) {
+  $("#proxyInput").value = d.upstream || "";
+  $("#relayState").textContent = d.relayAlive ? "中继运行中 · " + d.relayPort : "中继未运行";
+  $("#relayState").className = "pill-state " + (d.relayAlive ? "ok" : "bad");
+}
+
 async function loadProxy() {
   try {
-    const d = await api("/api/proxy");
-    $("#proxyInput").value = d.upstream || "";
-    $("#relayState").textContent = d.relayAlive ? "中继运行中 · " + d.relayPort : "中继未运行";
-    $("#relayState").className = "pill-state " + (d.relayAlive ? "ok" : "bad");
+    renderProxy(await api("/api/proxy"));
   } catch (e) {
     $("#relayState").textContent = "读取失败";
     $("#relayState").className = "pill-state bad";
@@ -1342,20 +1355,21 @@ async function consumeHashImport() {
 
 /* ------------------------------- 启动 ------------------------------- */
 (async function boot() {
+  // 直接 fetch：未登录时 401 只走一次 showLogin（api() 自己也会调一次）
+  let d = null;
   try {
-    const s = await api("/api/session");
-    if (s && s.ok) {
-      hideLogin(s.user);
-      await consumeHashImport().catch(() => {});
-      await loadAll();
-      if (typeof loadProxy === "function") loadProxy();
-    } else {
-      showLogin();
-    }
-  } catch (e) {
-    showLogin();
+    const res = await fetch("/api/bootstrap");
+    if (res.ok) d = await res.json();
+  } catch (e) { /* 网络错误按未登录处理 */ }
+  if (!d) return showLogin();
+  if ((location.hash || "").startsWith("#import=")) {
+    hideLogin(d.user);
+    await consumeHashImport().catch(() => {});
+    d = await api("/api/bootstrap");     // 书签回传后重新拉一次，显示刚导入的账号
   }
+  applyBootstrap(d);
 })();
 window.addEventListener("hashchange", () => consumeHashImport().catch(() => {}));
+document.addEventListener("visibilitychange", () => { if (!document.hidden) refreshStatus(); });
 setInterval(refreshStatus, 15000);
 setInterval(() => { renderAccounts(); }, 60000);

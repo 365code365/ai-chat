@@ -67,13 +67,16 @@ def _read_json(path, list_key):
             return {list_key: []}
 
 
-def atomic_write_json(path, data):
-    """先写 .tmp（0600）再原子替换，避免写一半被读到。"""
+def atomic_write_json(path, data, compact=False):
+    """先写 .tmp（0600）再原子替换，避免写一半被读到。compact=True 不缩进（高频写的文件用）。"""
     with _store_lock:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+            if compact:
+                json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
+            else:
+                json.dump(data, f, ensure_ascii=False, indent=2)
         os.chmod(tmp, 0o600)
         os.replace(tmp, path)
 
@@ -185,7 +188,7 @@ def save_job(record):
         jobs = [j for j in data["jobs"] if j.get("id") != record.get("id")]
         jobs.append(record)
         jobs.sort(key=lambda j: j.get("createdAt", 0))
-        atomic_write_json(JOBS_PATH, {"jobs": jobs[-JOBS_KEEP:]})
+        atomic_write_json(JOBS_PATH, {"jobs": jobs[-JOBS_KEEP:]}, compact=True)
 
 
 # --------------------------------------------------------------------------- #

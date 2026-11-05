@@ -193,6 +193,8 @@ class Handler(JSONHandler):
             if path == "/api/session":
                 return self._send(200, {"ok": bool(self._authed()),
                                         "user": self._authed() or ""})
+            if path == "/api/bootstrap":
+                return self.api_bootstrap()
             if path == "/api/status":
                 return self.api_status()
             if path == "/api/accounts":
@@ -305,12 +307,13 @@ class Handler(JSONHandler):
                 info = proxy_relay.parse_upstream(upstream)
             except Exception:
                 info = None
+        alive = relay_alive()
         return {
             "upstream": upstream,
             "valid": bool(info) if upstream else True,
             "relayPort": RELAY_PORT,
-            "relayAlive": relay_alive(),
-            "browserUsesRelay": relay_alive(),
+            "relayAlive": alive,
+            "browserUsesRelay": alive,
             "hint": "保存后点「重启浏览器」让代理生效" if upstream else "当前直连",
         }
 
@@ -395,13 +398,16 @@ class Handler(JSONHandler):
         }
 
     # ---------- 卡库接口 ----------
-    def api_cards(self):
-        cards = load_cards()["cards"]
-        accounts = load_store()["accounts"]
-        return self._send(200, {
+    def cards_payload(self, cards=None, accounts=None):
+        cards = load_cards()["cards"] if cards is None else cards
+        accounts = load_store()["accounts"] if accounts is None else accounts
+        return {
             "cards": [public_card(c, accounts) for c in cards],
             "accounts": [{"id": a["id"], "email": a.get("email", "")} for a in accounts],
-        })
+        }
+
+    def api_cards(self):
+        return self._send(200, self.cards_payload())
 
     def api_card_create(self):
         body = self._body()
@@ -561,9 +567,9 @@ class Handler(JSONHandler):
     def api_status(self):
         return self._send(200, self.status_payload())
 
-    def api_accounts(self):
-        store = load_store()
-        cards = load_cards()["cards"]
+    def accounts_payload(self, store=None, cards=None):
+        store = load_store() if store is None else store
+        cards = load_cards()["cards"] if cards is None else cards
         accounts = []
         for a in store["accounts"]:
             item = public_account(a, BROWSER.current_id)
@@ -574,9 +580,20 @@ class Handler(JSONHandler):
                 "last4": c["number"][-4:], "exp": c.get("exp", ""),
             } for c in bound]
             accounts.append(item)
+        return {"accounts": accounts, "status": self.status_payload()}
+
+    def api_accounts(self):
+        return self._send(200, self.accounts_payload())
+
+    def api_bootstrap(self):
+        """首屏一次拿齐：会话 + 账号 + 卡库 + 代理。原先要串行 3 轮请求。"""
+        store = load_store()
+        cards = load_cards()["cards"]
         return self._send(200, {
-            "accounts": accounts,
-            "status": self.status_payload(),
+            "user": self._authed() or "",
+            "accounts": self.accounts_payload(store, cards),
+            "cards": self.cards_payload(cards, store["accounts"]),
+            "proxy": self.proxy_payload(),
         })
 
     def api_account(self, acc_id):
@@ -779,7 +796,7 @@ class Handler(JSONHandler):
             return self._send(200, f.read(), "image/png")
 
     def static_file(self, path):
-        return self._static(WEB_DIR, path, extra={"Cache-Control": "no-store, must-revalidate"})
+        return self._static(WEB_DIR, path)
 
 
 def main():

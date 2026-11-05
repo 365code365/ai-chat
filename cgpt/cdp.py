@@ -1,5 +1,6 @@
 """CDP 与浏览器进程"""
 import base64
+import functools
 import json
 import os
 import re
@@ -54,19 +55,29 @@ def _get(url, timeout=2):
     return requests.get(url, timeout=timeout, proxies={})
 
 
-def debugger_ready(port, timeout=1.5):
-    end = time.time() + timeout
-    while time.time() < end:
-        try:
-            r = _get("http://127.0.0.1:%d/json/version" % port)
-            if r.ok:
-                return r.json()
-        except Exception:
-            pass
-        time.sleep(0.3)
+def debugger_alive(port, timeout=0.5):
+    """只探测一次调试端口：端口没开时连接立即被拒，不会像 debugger_ready 那样空等。"""
+    try:
+        r = _get("http://127.0.0.1:%d/json/version" % port, timeout=timeout)
+        if r.ok:
+            return r.json()
+    except Exception:
+        pass
     return None
 
 
+def debugger_ready(port, timeout=1.5):
+    """等待调试端口就绪（拉起浏览器后用）。"""
+    end = time.time() + timeout
+    while time.time() < end:
+        info = debugger_alive(port, timeout=1)
+        if info is not None:
+            return info
+        time.sleep(0.1)
+    return None
+
+
+@functools.lru_cache(maxsize=1)
 def _headless_ua():
     """无界面模式的默认 UA 带 HeadlessChrome 字样，换成同版本的普通 UA。"""
     try:
@@ -198,11 +209,25 @@ def wait_page_ready(cdp, timeout=45):
                 return True
         except Exception:
             pass
-        time.sleep(0.5)
+        time.sleep(0.25)
     return False
 
 
-def wait_for(cdp, expression, timeout=30, interval=1.0):
+def wait_until(predicate, timeout, interval=0.25):
+    """在 timeout 内轮询 predicate()，一旦为真立即返回 True（替代固定 sleep）。"""
+    end = time.time() + timeout
+    while True:
+        try:
+            if predicate():
+                return True
+        except Exception:
+            pass
+        if time.time() >= end:
+            return False
+        time.sleep(interval)
+
+
+def wait_for(cdp, expression, timeout=30, interval=0.4):
     """轮询一段返回真值的 JS 表达式。"""
     end = time.time() + timeout
     while time.time() < end:

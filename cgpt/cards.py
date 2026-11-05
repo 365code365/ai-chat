@@ -19,15 +19,17 @@ def find_card_frame(port, timeout=45):
                 continue
             if "elements-inner" not in url:
                 continue
+            cdp = None
             try:
                 cdp = CDP(t["webSocketDebuggerUrl"], timeout=20)
                 if cdp.js("document.querySelectorAll('input[name=number]').length",
                           await_promise=False):
                     return cdp
-                cdp.close()
             except Exception:
-                continue
-        time.sleep(1)
+                pass
+            if cdp is not None:
+                cdp.close()   # 不是目标 frame / 出错，都关掉，避免泄漏 websocket
+        time.sleep(0.5)
     return None
 
 
@@ -53,14 +55,16 @@ def _find_frame(port, presence_js, timeout=25):
                 continue
             if "elements-inner" not in url:
                 continue
+            cdp = None
             try:
                 cdp = CDP(t["webSocketDebuggerUrl"], timeout=20)
                 if cdp.js(presence_js, await_promise=False):
                     return cdp
-                cdp.close()
             except Exception:
-                continue
-        time.sleep(1)
+                pass
+            if cdp is not None:
+                cdp.close()
+        time.sleep(0.5)
     return None
 
 

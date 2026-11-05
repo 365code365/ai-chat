@@ -45,7 +45,8 @@ class Browser(object):
 
     # ---- 基础 ----
     def running(self):
-        return cgpt.debugger_ready(self.port, 0.6) is not None
+        # 单次探测：浏览器没开时端口立即拒连，不再空等 0.6s（管理端每次刷新状态都会调）
+        return cgpt.debugger_alive(self.port) is not None
 
     def ensure(self):
         if self.running():
@@ -61,8 +62,12 @@ class Browser(object):
         )
         self.started_at = time.time()
 
-    def attach(self):
-        """返回绑定到 chatgpt.com 标签页的 CDP；浏览器没开就先拉起来。"""
+    def attach(self, blank_ok=False):
+        """返回绑定到 chatgpt.com 标签页的 CDP；浏览器没开就先拉起来。
+
+        blank_ok=True（登录前用）：没有 chatgpt 标签时直接复用现成的空白页，
+        不先加载一遍 chatgpt.com —— 登录会写好 cookie 再导航，省掉一次整页加载。
+        """
         self.ensure()
         if self.cdp is not None:
             try:
@@ -71,9 +76,13 @@ class Browser(object):
             except Exception:
                 self.cdp = None
         tab = cgpt.find_chatgpt_tab(self.port)
+        if tab is None and blank_ok:
+            tab = next((t for t in cgpt.list_pages(self.port)
+                        if t.get("url", "") in ("about:blank", "")), None)
         if tab is None:
-            tab = cgpt.open_tab(self.port, "https://chatgpt.com/")
-            time.sleep(1.5)
+            tab = cgpt.open_tab(self.port, "about:blank" if blank_ok else "https://chatgpt.com/")
+            if not blank_ok:
+                time.sleep(1.5)
         self.tab_id = tab["id"]
         self.cdp = cgpt.CDP(tab["webSocketDebuggerUrl"])
         self.cdp.call("Page.enable")
@@ -95,7 +104,14 @@ class Browser(object):
             )
         except Exception:
             pass
-        time.sleep(1.5)
+        # 等进程真正退出（端口释放）再返回；顺带回收子进程，避免僵尸进程堆积
+        if self.proc is not None:
+            try:
+                self.proc.wait(timeout=5)
+            except Exception:
+                pass
+            self.proc = None
+        cgpt.wait_until(lambda: not self.running(), timeout=3, interval=0.15)
 
     def restart(self):
         self.kill()
@@ -109,10 +125,11 @@ class Browser(object):
         self.current_email = ""
 
     # ---- 业务 ----
-    def login(self, acc):
+    def login(self, acc, landing=None):
+        """写入会话并打开 landing（默认首页），返回登录到的邮箱。"""
         self.ensure()
-        cdp = self.attach()
-        email = cgpt.login_account(cdp, acc)
+        cdp = self.attach(blank_ok=True)
+        email = cgpt.login_account(cdp, acc, url=landing or "https://chatgpt.com/")
         if not email:
             raise RuntimeError("登录失败：会话可能已失效，请重新导出 token")
         if acc.get("email") and email.lower() != acc["email"].lower():
@@ -139,13 +156,13 @@ class Browser(object):
         cgpt.open_plan_dialog(cdp, plan, os.path.join(SHOT_DIR, "%s-%s.png" % (acc["id"], plan)))
         pattern = r"/立即购买|升级至|切换至|立即支付|确认支付|继续|订阅|Buy|Upgrade/"
         clicked = ""
+        on_checkout = lambda: "/checkout/" in (cdp.js("location.href", await_promise=False) or "")
         for _ in range(3):
             hit = cgpt.click_in_dialog(cdp, pattern) or ""
             if hit:
                 clicked = clicked or hit
-            time.sleep(1.5)
-            href = cdp.js("location.href", await_promise=False) or ""
-            if "/checkout/" in href:
+            # 最多等 1.5s，跳到结账页就立刻继续
+            if cgpt.wait_until(on_checkout, timeout=1.5):
                 break
         url = cgpt.wait_checkout(cdp, timeout=60)
         ready = cgpt.wait_card_ready(self.port, timeout=60) if url else False
@@ -154,7 +171,7 @@ class Browser(object):
         while time.time() < deadline and not amount:
             amount = cgpt.checkout_amount(cdp)
             if not amount:
-                time.sleep(0.8)
+                time.sleep(0.4)
         shot = cgpt.capture(cdp, os.path.join(SHOT_DIR, "%s-checkout.png" % acc["id"]))
         return {
             "ok": bool(url),
@@ -221,13 +238,13 @@ class Browser(object):
         while time.time() < deadline and not clicked:
             clicked = cgpt.click_in_page(cdp, pattern) or ""
             if not clicked:
-                time.sleep(1)
+                time.sleep(0.4)
         if not clicked:
             raise RuntimeError("没找到「订阅」按钮，页面可能不在结账状态")
         deadline = time.time() + 45
         text, url = "", ""
         while time.time() < deadline:
-            time.sleep(1.5)
+            time.sleep(0.75)
             try:
                 url = cdp.js("location.href", await_promise=False) or ""
                 text = cdp.js(

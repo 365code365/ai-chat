@@ -35,7 +35,7 @@ from store import (
     DATA_DIR, SHOT_DIR, luhn_ok, card_brand, mask_pan, load_cards, save_cards,
     public_card, normalize_exp, load_store, save_store, public_account, gen_code,
     ensure_codes, migrate_cards, card_account_ids, atomic_write_json, find_by_id,
-    VALID_PLANS, _store_lock,
+    load_jobs, VALID_PLANS, _store_lock,
 )
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -65,14 +65,22 @@ def upsert_account(item, alias=""):
     if not at:
         return None, "缺少 accessToken"
 
-    info = cgpt.decode_access_token(at)
+    info = cgpt.decode_access_token(at) or {}
+    if not (info.get("email") or info.get("user_id")):
+        return None, "accessToken 无法解析，请确认粘贴的是完整登录信息"
+
+    now_ts = int(time.time())
+    exp = info.get("exp")
     ok, res = cgpt.check_access_token(at)
-    if not ok:
-        status, err = "invalid", str(res)
-        info = info or {}
-    else:
+    if ok:
         status, err = "active", ""
         info.update({k: v for k, v in res.items() if v})
+    elif exp and exp < now_ts:
+        status, err = "expired", "accessToken 已过期，请重新导出登录信息"
+    else:
+        # 在线校验失败多半是 ChatGPT 的 Cloudflare 拦了裸请求（HTTP 403），
+        # token 本身未过期，按本地解析的信息正常导入，标记为「未校验」。
+        status, err = "unverified", "已导入，未能在线校验（%s）" % res
 
     uid = info.get("user_id") or hashlib.sha1(at.encode()).hexdigest()[:16]
     acc_id = re.sub(r"[^A-Za-z0-9_-]", "", uid)[:40] or hashlib.sha1(at.encode()).hexdigest()[:16]
@@ -110,8 +118,10 @@ def recheck(acc_id):
         acc = find_by_id(store["accounts"], acc_id)
         if not acc:
             return None
+        now_ts = int(time.time())
         ok, res = cgpt.check_access_token(acc["accessToken"])
-        acc["lastCheck"] = int(time.time())
+        acc["lastCheck"] = now_ts
+        exp = (cgpt.decode_access_token(acc["accessToken"]) or {}).get("exp")
         if ok:
             acc["status"] = "active"
             acc["lastError"] = ""
@@ -120,9 +130,12 @@ def recheck(acc_id):
             for k in ("email", "name"):
                 if res.get(k):
                     acc[k] = res[k]
+        elif exp and exp < now_ts:
+            acc["status"] = "expired"
+            acc["lastError"] = "accessToken 已过期"
         else:
-            acc["status"] = "invalid"
-            acc["lastError"] = str(res)
+            acc["status"] = "unverified"
+            acc["lastError"] = "未能在线校验（%s）" % res
         save_store(store)
         return acc
 
@@ -168,6 +181,8 @@ class Handler(JSONHandler):
                 return self.api_accounts()
             if path == "/api/cards":
                 return self.api_cards()
+            if path == "/api/jobs":
+                return self.api_jobs()
             m = re.match(r"^/api/accounts/([^/]+)/token$", path)
             if m:
                 qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
@@ -557,11 +572,16 @@ class Handler(JSONHandler):
                 results.append({"ok": False, "error": perr})
                 continue
             results.append({
-                "ok": acc.get("status") == "active",
+                "ok": acc.get("status") in ("active", "unverified"),
                 "error": perr,
                 "account": public_account(acc, BROWSER.current_id),
             })
         return self._send(200, {"results": results})
+
+    def api_jobs(self):
+        jobs = load_jobs()["jobs"]
+        jobs.sort(key=lambda j: j.get("createdAt", 0), reverse=True)
+        return self._send(200, {"jobs": jobs})
 
     def _update_account(self, acc_id, fn):
         """在锁内读-改-写单个账号，账号已被删除则跳过。"""

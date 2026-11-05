@@ -60,6 +60,12 @@
         </svg>
         <span>说明</span>
       </button>
+      <button class="nav-item" data-view="logs">
+        <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.7">
+          <path d="M4 5.5h16M4 12h16M4 18.5h10" stroke-linecap="round"/>
+        </svg>
+        <span>兑换记录</span><i class="nav-count" id="navJobCount"></i>
+      </button>
     </nav>
 
     <div class="rail-foot">
@@ -73,6 +79,9 @@
       <button class="btn tiny ghost block" id="startBrowserBtn">启动浏览器</button>
       <a class="rail-link" id="customerLink" href="/" target="_blank" rel="noopener">
         客户兑换页 ↗
+      </a>
+      <a class="rail-link hidden" id="vncLink" href="#" target="_blank" rel="noopener">
+        查看浏览器画面 ↗
       </a>
       <div class="user-box">
         <span id="userName">admin</span>
@@ -250,7 +259,30 @@
           <li><b>登录失败</b>：session 被踢下线，回 ChatGPT 重新导出或再用书签抓一次。</li>
           <li><b>结账页没出来</b>：点「去结账」后等 20–40 秒；被 Cloudflare 拦时重试即可。</li>
           <li><b>提交后被拒</b>：Stripe 返回的原文会显示在抽屉里，按提示换卡或核对地址。</li>
+          <li><b>兑换卡住</b>：到「兑换记录」看客户那笔卡在哪一步、报错原文和当时的页面截图。</li>
         </ul>
+      </div>
+    </section>
+
+    <section class="view" id="view-logs" hidden>
+      <header class="page-head">
+        <div>
+          <h1>兑换记录</h1>
+          <p>客户每次兑换开通的全过程；失败时可看卡在哪一步、报错原文和当时的页面截图。</p>
+        </div>
+        <div class="head-actions">
+          <button class="btn ghost" id="jobsRefreshBtn">刷新</button>
+        </div>
+      </header>
+      <div class="job-list" id="jobList"></div>
+      <div class="empty" id="jobEmpty">
+        <div class="empty-art">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <path d="M4 5.5h16M4 12h16M4 18.5h10" stroke-linecap="round"/>
+          </svg>
+        </div>
+        <h3>还没有兑换记录</h3>
+        <p>客户在兑换页提交开通后，这里会出现对应的处理记录。</p>
       </div>
     </section>
 

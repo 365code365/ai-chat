@@ -233,6 +233,7 @@ $("#logoutBtn").addEventListener("click", async () => {
 function setView(view) {
   state.view = view;
   if (view === "proxy" && typeof loadProxy === "function") loadProxy();
+  if (view === "logs") loadJobs();
   $$(".nav-item").forEach((b) => b.classList.toggle("active", b.dataset.view === view));
   $$(".view").forEach((v) => (v.hidden = v.id !== `view-${view}`));
 }
@@ -399,6 +400,83 @@ function cardRow(c) {
 
 const CARD_HEAD = `<div class="card-head"><span>卡片</span><span>可用套餐</span><span>兑换码</span><span>绑定账号</span><span></span></div>`;
 
+/* ------------------------------- 兑换记录 ------------------------------- */
+const JOB_STEPS = ["login", "plan", "checkout", "card", "address", "submit"];
+const JOB_STEP_LABEL = {
+  login: "登录 ChatGPT", plan: "打开订阅页", checkout: "进入付款页",
+  card: "填写支付信息", address: "填写账单地址", submit: "提交订阅",
+};
+
+function jobTime(ts) {
+  if (!ts) return "—";
+  const d = new Date(ts * 1000);
+  const p = (n) => String(n).padStart(2, "0");
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+function jobDuration(ms) {
+  if (!ms && ms !== 0) return "";
+  const s = Math.round(ms / 1000);
+  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m${s % 60}s`;
+}
+
+function jobStatusTag(j) {
+  if (!j.done) return '<span class="status warn">进行中</span>';
+  if (j.ok) return '<span class="status ok">成功</span>';
+  return '<span class="status bad">失败</span>';
+}
+
+function jobRow(j) {
+  const stepTimeline = JOB_STEPS.map((k) => {
+    const rec = (j.steps || []).find((s) => s.key === k);
+    const st = rec ? rec.status : (j.done ? "skip" : "skip");
+    const dur = rec && rec.durationMs != null ? ` <em>${jobDuration(rec.durationMs)}</em>` : "";
+    return `<li class="jl-step ${st}"><i></i><span>${JOB_STEP_LABEL[k]}</span>${dur}</li>`;
+  }).join("");
+  const logs = (j.log || []).map((l) =>
+    `<div class="jl-logline"><span>${jobTime(l.t)}</span>${esc(l.text)}</div>`).join("");
+  const failLine = (j.done && !j.ok)
+    ? `<div class="jl-error"><b>卡在「${esc(j.failedStepLabel || j.stepLabel || "—")}」</b>${esc(j.message || "")}</div>`
+    : "";
+  const shot = j.shot
+    ? `<a class="jl-shot" href="${esc(j.shot)}" target="_blank" rel="noopener"><img src="${esc(j.shot)}" alt="页面截图" loading="lazy" /></a>`
+    : "";
+  return `
+  <details class="job-item ${j.done ? (j.ok ? "ok" : "bad") : "running"}">
+    <summary>
+      <span class="jl-status">${jobStatusTag(j)}</span>
+      <code class="jl-code">${esc(j.code || "—")}</code>
+      <span class="jl-plan">${(j.plan || "").toUpperCase()}</span>
+      <span class="jl-acc" title="${esc(j.account || "")}">${esc(j.account || "未知账号")}</span>
+      <span class="jl-where">${j.done && !j.ok ? "卡在 " + esc(j.failedStepLabel || "—") : esc(j.stepLabel || "")}</span>
+      <span class="jl-time">${jobTime(j.createdAt)}${j.durationMs ? " · " + jobDuration(j.durationMs) : ""}</span>
+    </summary>
+    <div class="jl-body">
+      <div class="jl-main">
+        <ul class="jl-timeline">${stepTimeline}</ul>
+        ${failLine}
+        <div class="jl-logs">${logs || '<div class="muted small">无日志</div>'}</div>
+      </div>
+      ${shot ? `<div class="jl-side">${shot}<span class="muted tiny">当时的页面</span></div>` : ""}
+    </div>
+  </details>`;
+}
+
+async function loadJobs() {
+  try {
+    const d = await api("/api/jobs");
+    state.jobs = d.jobs || [];
+  } catch (e) {
+    toast(e.message, "bad");
+    return;
+  }
+  $("#jobList").innerHTML = state.jobs.map(jobRow).join("");
+  $("#jobEmpty").classList.toggle("hidden", state.jobs.length > 0);
+  $("#navJobCount").textContent = state.jobs.length || "";
+}
+
+$("#jobsRefreshBtn")?.addEventListener("click", () => loadJobs());
+
 function renderCards() {
   $("#cardList").innerHTML = state.cards.length ? CARD_HEAD + state.cards.map(cardRow).join("") : "";
   $("#navCardCount").textContent = state.cards.length;
@@ -500,6 +578,13 @@ const CUSTOMER_URL = location.port === "8899"
   ? `${location.protocol}//${location.hostname}:8900/`
   : `${location.protocol}//${location.hostname}/`;
 $("#customerLink").href = CUSTOMER_URL;
+
+// 「查看浏览器画面」：线上管理端（9443）才有 noVNC（在 9444），本地开发没有就隐藏
+if (location.port === "9443") {
+  const vnc = $("#vncLink");
+  vnc.href = `https://${location.hostname}:9444/vnc.html?autoconnect=1&reconnect=1&resize=scale&path=websockify`;
+  vnc.classList.remove("hidden");
+}
 
 /* ------------------------------- 导入 ------------------------------- */
 const ADMIN_URL = location.origin;

@@ -1,7 +1,13 @@
-"""browser.py — 共享的独立 Chrome 实例（管理端与客户页复用）。"""
+"""browser.py — 独立 Chrome 实例。
+
+管理端手动操作用单例 BROWSER（端口 9333）；客户自动开通走浏览器池 POOL
+（每个实例独立 profile + 调试端口，按需拉起，并发数由 TD_BROWSER_POOL 限制，
+避免一次开太多 Chrome 把内存吃爆）。
+"""
 import os
 import socket
 import subprocess
+import threading
 import time
 
 import cgpt
@@ -11,6 +17,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 BROWSER_PORT = 9333
 BROWSER_PROFILE = os.path.join(HERE, ".chrome-gpt-profile")
 RELAY_PORT = 8898
+
+# 客户开通的并发浏览器数（每个约 300–500MB 内存）。默认 2，可用环境变量调。
+POOL_SIZE = max(1, int(os.environ.get("TD_BROWSER_POOL", "2")))
+POOL_BASE_PORT = 9340
 
 
 def relay_alive(port=RELAY_PORT, timeout=0.6):
@@ -22,9 +32,10 @@ def relay_alive(port=RELAY_PORT, timeout=0.6):
 
 
 class Browser(object):
-    def __init__(self):
-        self.port = BROWSER_PORT
-        self.profile = BROWSER_PROFILE
+    def __init__(self, port=BROWSER_PORT, profile=BROWSER_PROFILE, name="main"):
+        self.port = port
+        self.profile = profile
+        self.name = name
         self.current_id = None      # 当前登录的账号 id
         self.current_email = ""
         self.cdp = None
@@ -46,7 +57,7 @@ class Browser(object):
                      "--proxy-bypass-list=127.0.0.1;localhost;::1"]
         self.proc = cgpt.launch_browser(
             self.port, self.profile, headless=cgpt.HEADLESS,
-            log_path=os.path.join(HERE, "chrome.log"), extra_args=extra,
+            log_path=os.path.join(HERE, "chrome-%s.log" % self.name), extra_args=extra,
         )
         self.started_at = time.time()
 
@@ -238,4 +249,43 @@ class Browser(object):
         return res
 
 
+# 管理端手动操作的单例浏览器
 BROWSER = Browser()
+
+
+# --------------------------------------------------------------------------- #
+# 客户开通的浏览器池：按需拉起，最多同时 POOL_SIZE 个
+# --------------------------------------------------------------------------- #
+class BrowserPool(object):
+    def __init__(self, size=POOL_SIZE):
+        self.size = size
+        self.browsers = [
+            Browser(port=POOL_BASE_PORT + i,
+                    profile=os.path.join(HERE, ".chrome-gpt-profile-c%d" % i),
+                    name="c%d" % i)
+            for i in range(size)
+        ]
+        self._free = list(self.browsers)
+        self._lock = threading.Lock()
+        self._sem = threading.Semaphore(size)
+
+    def acquire(self, timeout=180):
+        """取一个空闲浏览器；池满则阻塞排队，超时抛错。"""
+        if not self._sem.acquire(timeout=timeout):
+            raise RuntimeError("当前开通的人较多，请稍后再试")
+        with self._lock:
+            return self._free.pop()
+
+    def release(self, br):
+        with self._lock:
+            if br not in self._free:
+                self._free.append(br)
+        self._sem.release()
+
+    def inflight(self):
+        """正在使用中的浏览器数。"""
+        with self._lock:
+            return self.size - len(self._free)
+
+
+POOL = BrowserPool()

@@ -168,6 +168,27 @@ def code_active(card):
 
 
 # --------------------------------------------------------------------------- #
+# 兑换 / 订阅任务记录（客户端写、管理端读，经 data/jobs.json 跨进程共享）
+# --------------------------------------------------------------------------- #
+JOBS_PATH = os.path.join(DATA_DIR, "jobs.json")
+JOBS_KEEP = 300
+
+
+def load_jobs():
+    return _read_json(JOBS_PATH, "jobs")
+
+
+def save_job(record):
+    """按 id upsert 一条任务记录；只保留最近 JOBS_KEEP 条。记录不含卡号/CVC/token。"""
+    with _store_lock:
+        data = _read_json(JOBS_PATH, "jobs")
+        jobs = [j for j in data["jobs"] if j.get("id") != record.get("id")]
+        jobs.append(record)
+        jobs.sort(key=lambda j: j.get("createdAt", 0))
+        atomic_write_json(JOBS_PATH, {"jobs": jobs[-JOBS_KEEP:]})
+
+
+# --------------------------------------------------------------------------- #
 # 卡库
 # --------------------------------------------------------------------------- #
 def load_cards():

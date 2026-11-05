@@ -24,12 +24,25 @@ import time
 import uuid
 
 import cgpt
-from browser import BROWSER
+from browser import POOL
 from httpbase import JSONHandler, ThreadingHTTPServer
 from store import (
     SHOT_DIR, VALID_PLANS, card_plans, code_active, code_state,
     customer_card_view, ensure_codes, find_card_by_code, load_cards, save_cards,
+    save_job,
 )
+
+# 订阅链路的环节（key -> 中文名），兑换记录按此展示「卡在哪一步」
+STEP_LABELS = {
+    "queued": "排队中",
+    "login": "登录 ChatGPT",
+    "plan": "打开订阅页",
+    "checkout": "进入付款页",
+    "card": "填写支付信息",
+    "address": "填写账单地址",
+    "submit": "提交订阅",
+    "done": "完成",
+}
 
 # 兑换码状态对应的客户提示
 _CODE_BLOCK_MSG = {
@@ -46,7 +59,8 @@ JOB_TTL = 6 * 3600
 
 _jobs = {}
 _job_lock = threading.Lock()
-_run_lock = threading.Lock()
+# 允许排队的最大在途任务数（池并发 + 少量排队），超过直接婉拒
+MAX_PENDING = POOL.size + 3
 
 
 def _add_job(job):
@@ -57,6 +71,22 @@ def _add_job(job):
         for k in stale:
             _jobs.pop(k, None)
         _jobs[job["id"]] = job
+    _persist(job)
+
+
+# 持久化到 data/jobs.json 供管理端「兑换记录」读取。只存非敏感字段（无卡号/CVC/token）。
+_PUBLIC_FIELDS = ("id", "code", "plan", "cardBrand", "cardLast4", "account",
+                  "step", "stepLabel", "status", "message", "done", "ok",
+                  "failedStep", "failedStepLabel", "steps", "log", "shot",
+                  "createdAt", "updatedAt", "finishedAt", "durationMs")
+
+
+def _persist(job):
+    try:
+        rec = {k: job[k] for k in _PUBLIC_FIELDS if k in job}
+        save_job(rec)
+    except Exception:
+        pass
 
 
 # --------------------------------------------------------------------------- #
@@ -82,23 +112,49 @@ def check_session(raw):
 # 订阅任务
 # --------------------------------------------------------------------------- #
 def _set_step(job, key, status, message="", done=False, ok=None):
+    now = time.time()
+    steps = job.setdefault("steps", [])
+    # 关掉上一个 running 的环节，记录耗时
+    if steps and steps[-1]["status"] == "running":
+        steps[-1]["status"] = "error" if status == "error" else "done"
+        steps[-1]["durationMs"] = int((now - steps[-1]["startedAt"]) * 1000)
+    if status == "running":
+        steps.append({"key": key, "label": STEP_LABELS.get(key, key),
+                      "status": "running", "startedAt": now, "durationMs": None})
+    if status == "error":
+        # 标记失败所在环节
+        failed = steps[-1] if steps else None
+        job["failedStep"] = (failed or {}).get("key", key)
+        job["failedStepLabel"] = (failed or {}).get("label", STEP_LABELS.get(key, key))
     job["step"] = key
+    job["stepLabel"] = STEP_LABELS.get(key, key)
     job["status"] = status
     job["message"] = message
     if done:
         job["done"] = True
         job["ok"] = ok
-    job["updatedAt"] = int(time.time())
+        job["finishedAt"] = int(now)
+        if job.get("createdAt"):
+            job["durationMs"] = int((now - job["createdAt"]) * 1000)
+    job["updatedAt"] = int(now)
+    _persist(job)
 
 
 def _log(job, text):
     job.setdefault("log", []).append({"t": int(time.time()), "text": text})
+    _persist(job)
 
 
 def run_subscribe(job, card, plan, session):
-    """后台跑完整订阅链路，逐步更新进度。"""
+    """后台跑完整订阅链路，逐步更新进度。每笔占用池里一个独立浏览器。"""
+    last_cdp = None
+    br = None
     try:
-        # 任务已被 _run_lock 串行化：重新核对兑换码，挡住「同码重复下单」。
+        # 排队等一个空闲浏览器（并发数由 POOL 限制）
+        br = POOL.acquire()
+        _log(job, "已分配浏览器：%s" % br.name)
+
+        # 重新核对兑换码，挡住「同码重复下单」。
         fresh = find_card_by_code(card.get("code"))
         if not fresh or not code_active(fresh):
             raise RuntimeError("兑换码已被使用或失效，已阻止重复下单")
@@ -108,6 +164,8 @@ def run_subscribe(job, card, plan, session):
             raise RuntimeError(err or "没能解析登录信息")
         item = items[0]
         info = cgpt.decode_access_token(item.get("accessToken", ""))
+        job["account"] = info.get("email", "")
+        _persist(job)
         account = {
             "id": "cust-" + hashlib.sha1(item["accessToken"].encode()).hexdigest()[:12],
             "email": info.get("email", ""),
@@ -121,13 +179,15 @@ def run_subscribe(job, card, plan, session):
 
         _set_step(job, "login", "running", "正在登录 ChatGPT…")
         _log(job, "导入登录态：%s" % (account["email"] or "未知账号"))
-        email = BROWSER.login(account)
+        email = br.login(account)
         _log(job, "已登录：%s" % email)
 
         _set_step(job, "plan", "running", "正在打开%s订阅页…" % ("Plus" if plan == "plus" else "Pro"))
-        cdp = BROWSER.attach()
+        cdp = br.attach()
+        last_cdp = cdp
         shot = os.path.join(SHOT_DIR, "customer-%s.png" % job["id"])
         cgpt.open_plan_dialog(cdp, plan, shot)
+        job["shot"] = "/api/shots/customer-%s.png" % job["id"]
 
         _set_step(job, "checkout", "running", "正在进入付款页…")
         confirm = r"/立即支付|确认支付|继续前往|Continue/"
@@ -139,27 +199,28 @@ def run_subscribe(job, card, plan, session):
             time.sleep(1.5)
             if "/checkout/" in (cdp.js("location.href", await_promise=False) or ""):
                 break
-        tab = cgpt.find_checkout_tab(BROWSER.port, timeout=150)
+        tab = cgpt.find_checkout_tab(br.port, timeout=150)
         if not tab:
             raise RuntimeError("没能进入付款页（可能已经是当前套餐，或页面加载超时）")
         url = tab.get("url", "")
         cdp = cgpt.CDP(tab["webSocketDebuggerUrl"])
         cdp.call("Page.enable")
+        last_cdp = cdp
         _log(job, "付款页：%s" % url[:80])
 
-        ready = cgpt.wait_card_ready(BROWSER.port, timeout=90)
+        ready = cgpt.wait_card_ready(br.port, timeout=90)
         if not ready:
             raise RuntimeError("付款页的卡信息框没有加载出来")
 
         _set_step(job, "card", "running", "正在填写支付信息…")
-        cgpt.fill_card(BROWSER.port, card["number"], card["exp"], card["cvc"])
+        cgpt.fill_card(br.port, card["number"], card["exp"], card["cvc"])
         _log(job, "已填入 %s ···· %s" % (customer_card_view(card)["brand"], card["number"][-4:]))
 
         _set_step(job, "address", "running", "正在填写账单地址…")
         try:
-            cgpt.reveal_billing(cdp, BROWSER.port)
+            cgpt.reveal_billing(cdp, br.port)
             cgpt.fill_address(
-                BROWSER.port,
+                br.port,
                 name=card.get("holder", ""),
                 country=card.get("country", "JP"),
                 postal=card.get("postal", ""),
@@ -173,7 +234,7 @@ def run_subscribe(job, card, plan, session):
             _log(job, "跳过账单地址：%s" % str(exc)[:60])
 
         _set_step(job, "submit", "running", "正在提交订阅…")
-        res = BROWSER.submit_checkout()
+        res = br.submit_checkout()
         text = (res.get("text") or "").strip()
         _log(job, text.split("\n")[0][:120] if text else "已提交")
 
@@ -191,10 +252,26 @@ def run_subscribe(job, card, plan, session):
                   "已提交，请到 ChatGPT 查看订阅状态" if pending else "订阅结果已返回",
                   done=True, ok=True)
     except Exception as exc:
+        # 失败时截一张当前页面，方便管理端排查卡在哪
+        try:
+            if last_cdp is not None:
+                name = "customer-%s-fail.png" % job["id"]
+                cgpt.capture(last_cdp, os.path.join(SHOT_DIR, name))
+                job["shot"] = "/api/shots/%s" % name
+        except Exception:
+            pass
         _set_step(job, "error", "error", str(exc), done=True, ok=False)
         _log(job, "失败：%s" % exc)
     finally:
-        job["finishedAt"] = int(time.time())
+        if br is not None:
+            # 断开本次任务的会话并归还浏览器，供下一笔复用
+            try:
+                br.close()
+            except Exception:
+                pass
+            POOL.release(br)
+        job.setdefault("finishedAt", int(time.time()))
+        _persist(job)
 
 
 # --------------------------------------------------------------------------- #
@@ -269,8 +346,9 @@ class Handler(JSONHandler):
         if serr:
             return self._err(serr)
 
-        if _run_lock.locked():
-            return self._err("前面还有订单在处理，请稍等几十秒再试", 429)
+        pending = sum(1 for j in _jobs.values() if not j.get("done"))
+        if pending >= MAX_PENDING:
+            return self._err("当前开通的人较多，请稍后再试", 429)
 
         job = {
             "id": uuid.uuid4().hex[:12],
@@ -287,8 +365,7 @@ class Handler(JSONHandler):
         _add_job(job)
 
         def runner():
-            with _run_lock:
-                run_subscribe(job, dict(card), plan, raw)
+            run_subscribe(job, dict(card), plan, raw)
 
         threading.Thread(target=runner, daemon=True).start()
         return self._send(200, {"jobId": job["id"]})

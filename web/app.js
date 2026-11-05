@@ -582,8 +582,22 @@ $("#customerLink").href = CUSTOMER_URL;
 // 「查看浏览器画面」：线上管理端（9443）才有 noVNC（在 9444），本地开发没有就隐藏
 if (location.port === "9443") {
   const vnc = $("#vncLink");
-  vnc.href = `https://${location.hostname}:9444/vnc.html?autoconnect=1&reconnect=1&resize=scale&path=websockify`;
   vnc.classList.remove("hidden");
+  vnc.addEventListener("click", async (e) => {
+    e.preventDefault();
+    // 先同步开一个空标签页，避免异步后被浏览器拦截弹窗
+    const w = window.open("about:blank", "_blank");
+    try {
+      const d = await api("/api/vnc");   // 后端生成临时密码并应用
+      const url = `https://${location.hostname}:${d.port || 9444}/vnc.html`
+        + `?autoconnect=1&reconnect=1&resize=scale&path=websockify`
+        + `&password=${encodeURIComponent(d.password)}`;
+      if (w) w.location.href = url; else window.open(url, "_blank", "noopener");
+    } catch (err) {
+      if (w) w.close();
+      toast(err.message, "bad");
+    }
+  });
 }
 
 /* ------------------------------- 导入 ------------------------------- */

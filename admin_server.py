@@ -19,6 +19,10 @@ import hashlib
 import json
 import os
 import re
+import secrets
+import shutil
+import socket
+import subprocess
 import threading
 import time
 import urllib.parse
@@ -183,6 +187,8 @@ class Handler(JSONHandler):
                 return self.api_cards()
             if path == "/api/jobs":
                 return self.api_jobs()
+            if path == "/api/vnc":
+                return self.api_vnc()
             m = re.match(r"^/api/accounts/([^/]+)/token$", path)
             if m:
                 qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
@@ -582,6 +588,31 @@ class Handler(JSONHandler):
         jobs = load_jobs()["jobs"]
         jobs.sort(key=lambda j: j.get("createdAt", 0), reverse=True)
         return self._send(200, {"jobs": jobs})
+
+    def api_vnc(self):
+        """生成一个临时 VNC 密码，应用到 x11vnc，返回给前端自动填充（仅线上可用）。"""
+        vncpass = os.path.join(DATA_DIR, ".vncpass")
+        if not shutil.which("x11vnc") or not os.path.exists(
+                "/etc/systemd/system/tokendesk-x11vnc.service"):
+            return self._err("本机未启用 VNC（仅线上管理端可用）", 400)
+        # VNC 经典认证只取前 8 位，这里就用 8 位、去掉易混淆字符
+        pw = "".join(secrets.choice("abcdefghijkmnpqrstuvwxyz23456789") for _ in range(8))
+        try:
+            subprocess.run(["x11vnc", "-storepasswd", pw, vncpass],
+                           check=True, capture_output=True, timeout=10)
+            os.chmod(vncpass, 0o600)
+            subprocess.run(["systemctl", "restart", "tokendesk-x11vnc"],
+                           check=True, capture_output=True, timeout=15)
+            # 等 x11vnc 重新监听 5900，避免前端连太早
+            for _ in range(30):
+                with socket.socket() as s:
+                    s.settimeout(0.4)
+                    if s.connect_ex(("127.0.0.1", 5900)) == 0:
+                        break
+                time.sleep(0.2)
+        except Exception as exc:
+            return self._err("生成 VNC 密码失败：%s" % exc, 500)
+        return self._send(200, {"password": pw, "port": 9444})
 
     def _update_account(self, acc_id, fn):
         """在锁内读-改-写单个账号，账号已被删除则跳过。"""

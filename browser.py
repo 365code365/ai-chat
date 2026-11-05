@@ -81,10 +81,18 @@ class Browser(object):
         return self.cdp
 
     def kill(self):
-        """真正结束 Chrome 进程（close 只断 CDP）。"""
+        """真正结束 Chrome 进程（close 只断 CDP）。
+
+        按调试端口精确匹配（每个实例端口唯一），避免 profile 前缀误伤：
+        管理端 .chrome-gpt-profile 是池实例 .chrome-gpt-profile-c0 的子串，
+        用 profile 匹配会把池里的浏览器一起杀掉。
+        """
         self.close()
         try:
-            subprocess.run(["pkill", "-f", self.profile], timeout=10)
+            subprocess.run(
+                ["pkill", "-f", "remote-debugging-port=%d" % self.port],
+                timeout=10,
+            )
         except Exception:
             pass
         time.sleep(1.5)

@@ -14,8 +14,9 @@ from .config import CHROME
 
 class CDP(object):
     def __init__(self, ws_url, timeout=120):
+        # 限制单帧大小（截图是最大的帧），避免 CDP 缓冲占用无上限内存。
         self.ws = websocket.create_connection(
-            ws_url, max_size=None, suppress_origin=True, timeout=timeout
+            ws_url, max_size=48 * 1024 * 1024, suppress_origin=True, timeout=timeout
         )
         self._id = 0
 
@@ -89,10 +90,35 @@ def launch_browser(port, profile, headless=False, log_path=None, extra_args=None
         "--no-default-browser-check",
         "--window-size=1440,960",
         "--disable-dev-shm-usage",
+        # —— 省内存：关掉站点隔离（每个站点一个进程是内存大户），限制渲染进程数 ——
+        "--disable-features=IsolateOrigins,site-per-process,Translate,"
+        "MediaRouter,OptimizationHints,InterestFeedContentSuggestions,"
+        "CalculateNativeWinOcclusion",
+        "--renderer-process-limit=2",
+        "--disable-gpu",
+        "--disable-software-rasterizer",
+        # 关掉一堆用不到的后台服务，降低常驻内存和 CPU
+        "--disable-extensions",
+        "--disable-background-networking",
+        "--disable-background-timer-throttling",
+        "--disable-backgrounding-occluded-windows",
+        "--disable-renderer-backgrounding",
+        "--disable-sync",
+        "--disable-default-apps",
+        "--disable-component-update",
+        "--disable-breakpad",
+        "--disable-crash-reporter",
+        "--mute-audio",
+        "--metrics-recording-only",
+        "--no-pings",
+        # 限制 V8 老生代堆和磁盘缓存，避免单个 tab 吃太多
+        "--js-flags=--max-old-space-size=256",
+        "--disk-cache-size=33554432",
+        "--media-cache-size=16777216",
     ]
     cmd += list(extra_args or [])
     if headless:
-        cmd += ["--headless=new", "--disable-gpu"]
+        cmd += ["--headless=new"]
         ua = _headless_ua()
         if ua:
             cmd.append("--user-agent=%s" % ua)

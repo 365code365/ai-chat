@@ -264,9 +264,10 @@ def run_subscribe(job, card, plan, session):
         _log(job, "失败：%s" % exc)
     finally:
         if br is not None:
-            # 断开本次任务的会话并归还浏览器，供下一笔复用
+            # 结束本次任务：彻底杀掉 Chrome 进程释放内存（close 只断 CDP，
+            # 进程会一直占着 ~400MB）。下一笔用时再按需拉起。
             try:
-                br.close()
+                br.kill()
             except Exception:
                 pass
             POOL.release(br)

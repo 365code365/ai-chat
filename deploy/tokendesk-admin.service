@@ -1,0 +1,17 @@
+[Unit]
+Description=TokenDesk 管理端
+After=network.target tokendesk-relay.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/gpt-buy
+Environment=TD_DATA_DIR=/opt/gpt-buy/data
+# 建议显式设置管理员密码；留空则首启自动生成并写入 data/初始密码.txt
+# Environment=ADMIN_USER=admin
+# Environment=ADMIN_PASSWORD=改成你的强密码
+ExecStart=/opt/gpt-buy/.venv/bin/python admin_server.py --host 127.0.0.1 --port 8930
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

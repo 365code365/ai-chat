@@ -1,0 +1,14 @@
+[Unit]
+Description=TokenDesk 本地代理中继
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/gpt-buy
+Environment=TD_DATA_DIR=/opt/gpt-buy/data
+ExecStart=/opt/gpt-buy/.venv/bin/python proxy_relay.py --host 127.0.0.1 --port 8898
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

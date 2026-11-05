@@ -93,8 +93,9 @@ cgpt/                  # 自动化核心（原 cgpt.py 拆分）
   auth.py              token 解析、cookie 分块注入、登录
   plans.py             定价页、套餐弹窗、结账页跳转
   cards.py             Stripe 卡信息与账单地址填写
-store.py               账号 / 卡库 / 兑换码 持久化
+store.py               账号 / 卡库 / 兑换码 持久化（含原子写 JSON 工具）
 browser.py             共享 Chrome 单例
+httpbase.py            两个服务共用的 HTTP 基类（JSON 响应、请求体、静态文件）
 admin_server.py        后台 API + 静态服务（629 行）
 customer_server.py     客户页 API + 订阅任务队列（311 行）
 web/                   后台前端（深色）

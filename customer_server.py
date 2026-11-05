@@ -17,74 +17,65 @@ customer_server.py — 客户兑换页（与后台完全隔离）
 """
 import argparse
 import hashlib
-import json
-import mimetypes
 import os
 import re
-import socketserver
 import threading
 import time
-import urllib.parse
 import uuid
-from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import cgpt
 from browser import BROWSER
-from store import (  # noqa: F401
-    SHOT_DIR, card_plans, customer_card_view, ensure_codes, find_card_by_code,
-    load_cards, load_store, save_cards,
+from httpbase import JSONHandler, ThreadingHTTPServer
+from store import (
+    SHOT_DIR, VALID_PLANS, card_plans, code_active, code_state,
+    customer_card_view, ensure_codes, find_card_by_code, load_cards, save_cards,
 )
+
+# 兑换码状态对应的客户提示
+_CODE_BLOCK_MSG = {
+    "used": "该兑换码已被使用，如需再次订阅请联系客服",
+    "revoked": "该兑换码已停用，请联系客服",
+    "none": "兑换码无效，请核对后重试",
+}
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 WEB_DIR = os.path.join(HERE, "web_customer")
+
+# 已结束的任务在内存里保留多久（秒），之后清理，避免 _jobs 无限增长
+JOB_TTL = 6 * 3600
 
 _jobs = {}
 _job_lock = threading.Lock()
 _run_lock = threading.Lock()
 
 
+def _add_job(job):
+    now = time.time()
+    with _job_lock:
+        stale = [k for k, j in _jobs.items()
+                 if j.get("done") and now - (j.get("finishedAt") or now) > JOB_TTL]
+        for k in stale:
+            _jobs.pop(k, None)
+        _jobs[job["id"]] = job
+
+
 # --------------------------------------------------------------------------- #
-# 抓取当前浏览器里的 ChatGPT 登录态
+# 登录信息校验
+#   客户在自己的浏览器里打开 chatgpt.com/api/auth/session，复制全部内容粘贴进来。
+#   （不再由服务端浏览器代抓：服务端浏览器里的登录态不属于当前客户。）
 # --------------------------------------------------------------------------- #
-SESSION_URL = "https://chatgpt.com/api/auth/session"
-
-
-def grab_session(timeout=25):
-    """在受控 Chrome 里打开 /api/auth/session，把 JSON 读回来。"""
-    BROWSER.ensure()
-    tab = cgpt.open_tab(BROWSER.port, SESSION_URL)
-    text = ""
-    cdp = None
-    try:
-        time.sleep(1.0)
-        cdp = cgpt.CDP(tab["webSocketDebuggerUrl"], timeout=30)
-        cdp.call("Page.enable")
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            try:
-                raw = cdp.js("document.body ? document.body.innerText : ''",
-                             await_promise=False) or ""
-            except Exception:
-                raw = ""
-            raw = raw.strip()
-            if raw.startswith("{"):
-                text = raw
-                break
-            time.sleep(0.6)
-    finally:
-        if cdp is not None:
-            cdp.close()
-        cgpt.close_tab(BROWSER.port, tab["id"])
-
-    if not text:
-        raise RuntimeError("没拿到登录信息，请确认这个浏览器里已经登录 chatgpt.com")
-    try:
-        data = json.loads(text)
-    except Exception:
-        raise RuntimeError("返回内容不是 JSON，可能被 Cloudflare 拦了，重试一次")
-    if not data.get("accessToken"):
-        raise RuntimeError("当前浏览器未登录 ChatGPT")
-    return json.dumps(data, ensure_ascii=False)
+def check_session(raw):
+    """返回 (item, 错误信息)。item 含 accessToken / sessionToken / expires。"""
+    items, err = cgpt.parse_session(raw)
+    if err or not items:
+        return None, "没能识别登录信息，请打开 chatgpt.com/api/auth/session 后复制全部内容"
+    item = items[0]
+    if not item.get("sessionToken"):
+        return None, "登录信息不完整（缺少 sessionToken），请复制该页面的全部内容"
+    exp = cgpt.iso_to_epoch(item.get("expires"))
+    if exp and exp < time.time():
+        return None, "登录信息已过期，请刷新该页面后重新复制"
+    return item, ""
 
 
 # --------------------------------------------------------------------------- #
@@ -107,6 +98,11 @@ def _log(job, text):
 def run_subscribe(job, card, plan, session):
     """后台跑完整订阅链路，逐步更新进度。"""
     try:
+        # 任务已被 _run_lock 串行化：重新核对兑换码，挡住「同码重复下单」。
+        fresh = find_card_by_code(card.get("code"))
+        if not fresh or not code_active(fresh):
+            raise RuntimeError("兑换码已被使用或失效，已阻止重复下单")
+
         items, err = cgpt.parse_session(session)
         if err or not items:
             raise RuntimeError(err or "没能解析登录信息")
@@ -204,44 +200,14 @@ def run_subscribe(job, card, plan, session):
 # --------------------------------------------------------------------------- #
 # HTTP
 # --------------------------------------------------------------------------- #
-class Handler(BaseHTTPRequestHandler):
-    protocol_version = "HTTP/1.1"
+class Handler(JSONHandler):
     server_version = "TokenDeskCustomer/1.0"
 
     def log_message(self, fmt, *args):
         pass
 
-    def _send(self, code, body, ctype="application/json; charset=utf-8"):
-        if isinstance(body, (dict, list)):
-            body = json.dumps(body, ensure_ascii=False)
-        data = body.encode("utf-8") if isinstance(body, str) else body
-        self.send_response(code)
-        self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(data)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        try:
-            self.wfile.write(data)
-        except Exception:
-            pass
-
-    def _err(self, msg, code=400):
-        self._send(code, {"error": str(msg)})
-
-    def _body(self):
-        try:
-            n = int(self.headers.get("Content-Length") or 0)
-        except Exception:
-            n = 0
-        if not n:
-            return {}
-        try:
-            return json.loads(self.rfile.read(n).decode("utf-8"))
-        except Exception:
-            return {}
-
     def do_GET(self):
-        path = self.path.split("?")[0]
+        path = self._path()
         if path == "/api/health":
             return self._send(200, {"ok": True, "time": int(time.time())})
         m = re.match(r"^/api/job/([^/]+)$", path)
@@ -249,18 +215,17 @@ class Handler(BaseHTTPRequestHandler):
             job = _jobs.get(m.group(1))
             if not job:
                 return self._err("任务不存在", 404)
-            return self._send(200, job)
+            # 浅拷贝后再序列化：任务线程可能正在往 job 里加字段
+            return self._send(200, dict(job))
         return self.static_file(path)
 
     def do_POST(self):
-        path = self.path.split("?")[0]
+        path = self._path()
         try:
             if path == "/api/verify":
                 return self.api_verify()
             if path == "/api/subscribe":
                 return self.api_subscribe()
-            if path == "/api/grab-session":
-                return self.api_grab_session()
             return self._err("未知接口", 404)
         except Exception as exc:
             return self._err(exc, 500)
@@ -272,24 +237,15 @@ class Handler(BaseHTTPRequestHandler):
         card = find_card_by_code(code)
         if not card:
             return self._send(200, {"ok": False, "error": "兑换码无效，请核对后重试"})
-        view = customer_card_view(card)
-        used = bool(card.get("codeUsedAt"))
-        allowed = card_plans(card)
+        if not code_active(card):
+            # 已用 / 已作废的兑换码直接拒绝，不暴露卡信息，防盗刷
+            return self._send(200, {"ok": False,
+                                    "error": _CODE_BLOCK_MSG.get(code_state(card), "兑换码已失效")})
         return self._send(200, {
             "ok": True,
-            "card": view,
-            "used": used,
-            "plans": allowed,
+            "card": customer_card_view(card),
+            "plans": card_plans(card),
         })
-
-    def api_grab_session(self):
-        if _run_lock.locked():
-            return self._err("正在处理订阅，稍后再试", 429)
-        try:
-            session = grab_session()
-        except Exception as exc:
-            return self._send(200, {"ok": False, "error": str(exc)})
-        return self._send(200, {"ok": True, "session": session})
 
     def api_subscribe(self):
         body = self._body()
@@ -300,13 +256,18 @@ class Handler(BaseHTTPRequestHandler):
         card = find_card_by_code(code)
         if not card:
             return self._err("兑换码无效")
-        if plan not in ("plus", "pro"):
+        if not code_active(card):
+            return self._err(_CODE_BLOCK_MSG.get(code_state(card), "兑换码已失效"))
+        if plan not in VALID_PLANS:
             return self._err("请选择 Plus 或 Pro")
         if plan not in card_plans(card):
             return self._err("这个兑换码只能开通 %s" % " / ".join(
                 p.capitalize() for p in card_plans(card)))
         if not str(raw).strip():
             return self._err("请先提供 ChatGPT 登录信息")
+        _, serr = check_session(raw)
+        if serr:
+            return self._err(serr)
 
         if _run_lock.locked():
             return self._err("前面还有订单在处理，请稍等几十秒再试", 429)
@@ -323,7 +284,7 @@ class Handler(BaseHTTPRequestHandler):
             "log": [],
             "createdAt": int(time.time()),
         }
-        _jobs[job["id"]] = job
+        _add_job(job)
 
         def runner():
             with _run_lock:
@@ -334,22 +295,7 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---------- 静态 ----------
     def static_file(self, path):
-        if path in ("/", ""):
-            path = "/index.html"
-        rel = path.lstrip("/")
-        full = os.path.normpath(os.path.join(WEB_DIR, rel))
-        if not full.startswith(WEB_DIR) or not os.path.isfile(full):
-            return self._err("Not found", 404)
-        ctype = mimetypes.guess_type(full)[0] or "application/octet-stream"
-        if ctype.startswith("text/") or ctype == "application/javascript":
-            ctype += "; charset=utf-8"
-        with open(full, "rb") as f:
-            self._send(200, f.read(), ctype)
-
-
-class ThreadingHTTPServer(socketserver.ThreadingMixIn, HTTPServer):
-    daemon_threads = True
-    allow_reuse_address = True
+        return self._static(WEB_DIR, path)
 
 
 def main():

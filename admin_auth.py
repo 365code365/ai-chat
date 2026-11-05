@@ -13,7 +13,7 @@ import threading
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.path.join(HERE, "data")
+DATA_DIR = os.environ.get("TD_DATA_DIR") or os.path.join(HERE, "data")
 AUTH_PATH = os.path.join(DATA_DIR, "auth.json")
 SESSION_PATH = os.path.join(DATA_DIR, "sessions.json")
 INIT_PW_PATH = os.path.join(DATA_DIR, "初始密码.txt")
@@ -24,6 +24,38 @@ COOKIE_NAME = "td_session"
 
 _sessions = {}
 _session_lock = threading.Lock()
+
+# 登录失败限流：窗口内失败过多即锁定一段时间
+FAIL_WINDOW = 300
+FAIL_MAX = 6
+LOCK_SECS = 120
+_fail_lock = threading.Lock()
+_fails = []          # 最近失败时间戳
+_locked_until = 0.0
+
+
+def login_locked():
+    """返回剩余锁定秒数（0 表示未锁定）。"""
+    with _fail_lock:
+        return max(0, int(_locked_until - time.time()))
+
+
+def note_login_fail():
+    global _locked_until
+    now = time.time()
+    with _fail_lock:
+        _fails[:] = [t for t in _fails if now - t < FAIL_WINDOW]
+        _fails.append(now)
+        if len(_fails) >= FAIL_MAX:
+            _locked_until = now + LOCK_SECS
+            _fails.clear()
+
+
+def note_login_ok():
+    global _locked_until
+    with _fail_lock:
+        _fails.clear()
+        _locked_until = 0.0
 
 
 def _load_sessions():

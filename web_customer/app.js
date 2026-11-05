@@ -12,8 +12,6 @@ const state = {
   timer: null,
 };
 
-const ADMIN_PORT = 8900;
-
 async function api(path, opts = {}) {
   const res = await fetch(path, {
     headers: { "Content-Type": "application/json" },
@@ -38,7 +36,24 @@ function setStep(n) {
     p.classList.toggle("active", i === n);
     p.classList.toggle("done", i < n);
   });
+  $("#stepCount").textContent = `第 ${n} 步，共 3 步`;
+  window.scrollTo({ top: 0 });
 }
+
+// 卡组织标识（与管理端一致）
+const BRAND_LOGO = {
+  visa: '<span class="logo-visa">VISA</span>',
+  mastercard: '<svg viewBox="0 0 26 16" width="26" height="16" aria-label="Mastercard">'
+    + '<circle cx="9" cy="8" r="7" fill="#EB001B"/><circle cx="17" cy="8" r="7" fill="#F79E1B"/>'
+    + '<path d="M13 2.26A7 7 0 0 1 13 13.74A7 7 0 0 1 13 2.26Z" fill="#FF5F00"/></svg>',
+  amex: '<span class="logo-amex">AMEX</span>',
+  jcb: '<span class="logo-text" style="color:#0b6b3a">JCB</span>',
+  unionpay: '<span class="logo-text" style="color:#c81f26">银联</span>',
+  discover: '<span class="logo-text" style="color:#e35205">DISC</span>',
+  diners: '<span class="logo-text" style="color:#0b3d91">DINERS</span>',
+  card: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="#8e8e98" stroke-width="1.7">'
+    + '<rect x="3" y="6" width="18" height="12" rx="2"/><path d="M3 10h18"/></svg>',
+};
 
 /* ------------------------------- 第一步 ------------------------------- */
 const codeInput = $("#codeInput");
@@ -64,16 +79,13 @@ async function verify() {
     state.code = code;
     state.card = d.card;
     applyPlans(d.plans || ["plus", "pro"]);
-    $("#cardBrandIcon").textContent = (d.card.brand || "CARD").toUpperCase().slice(0, 4);
+    const key = d.card.brandKey || "card";
+    $("#cardBrandIcon").innerHTML = BRAND_LOGO[key] || BRAND_LOGO.card;
     $("#cardLast4").textContent = d.card.last4 || "••••";
     $("#cardExp").textContent = d.card.exp || "--/--";
-    $("#cardLabel").textContent = `${d.card.brand || "银行卡"} 已匹配`;
+    $("#cardLabel").textContent = d.card.brand || "银行卡";
     showHint("");
     setStep(2);
-    if (d.used) {
-      $("#sessionHint").textContent = "提示：该兑换码已被使用过，如需重复订阅请联系客服";
-      $("#sessionHint").className = "muted";
-    }
   } catch (e) {
     showHint(e.message, "bad");
   } finally {
@@ -101,7 +113,7 @@ function applyPlans(allowed) {
   state.plan = first ? first.dataset.plan : "plus";
   all.forEach((b) => b.classList.toggle("selected", b === first));
   $("#planNote").textContent = allowed.length === 1
-    ? `该兑换码仅支持 ${allowed[0].toUpperCase()} 套餐`
+    ? `这个兑换码只能开通 ${allowed[0] === "pro" ? "Pro" : "Plus"}。`
     : "";
 }
 
@@ -113,87 +125,140 @@ $$(".plan").forEach((b) => {
 });
 $$(".plan")[0].classList.add("selected");
 
-/* 从浏览器自动获取登录信息 */
+/* ---------------- 登录信息：客户在自己浏览器里打开页面，复制粘贴 ---------------- */
+state.session = null;   // 校验通过后的 { raw, email, expires }
 
-async function grabSession() {
-  const btn = $("#grabBtn");
-  btn.classList.add("loading");
-  btn.disabled = true;
-  $("#grabHint").textContent = "正在打开 chatgpt.com/api/auth/session …";
-  try {
-    const d = await api("/api/grab-session", { method: "POST" });
-    if (!d.ok) throw new Error(d.error || "获取失败");
-    $("#sessionInput").value = d.session;
-    $("#sessionHint").textContent = "已获取登录信息 ✓";
-    $("#sessionHint").className = "muted";
-    $("#grabHint").textContent = "已自动填入，检查无误后点「开始订阅」";
-    $("#grabBtn").textContent = "重新获取";
-    const ta = $("#sessionInput");
-    ta.scrollTop = 0;
-    ta.setSelectionRange(0, 0);
-  } catch (e) {
-    $("#sessionHint").textContent = "";
-    $("#grabHint").textContent = `自动获取失败：${e.message}。可点右侧「手动打开该页面」复制内容。`;
-  } finally {
-    btn.classList.remove("loading");
-    btn.disabled = false;
+// 解析粘贴内容。复制整页时可能带上「美观输出」之类的页面文字，所以只取最外层的 {...}。
+function parseSession(text) {
+  const t = (text || "").trim();
+  if (!t) return { empty: true };
+  const start = t.indexOf("{");
+  const end = t.lastIndexOf("}");
+  if (start < 0 || end <= start) {
+    return { error: "没识别到登录信息，请确认复制的是「登录信息页面」的全部内容" };
   }
+  let obj;
+  try {
+    obj = JSON.parse(t.slice(start, end + 1));
+  } catch (e) {
+    return { error: "内容不完整，可能没复制全。请回到那个页面按 Ctrl/⌘+A 全选后重新复制" };
+  }
+  if (!obj || typeof obj !== "object" || !Object.keys(obj).length) {
+    return { error: "粘贴的是 {}：这个浏览器还没登录 ChatGPT。请先完成第 1 步登录，再重新打开页面" };
+  }
+  if (!obj.accessToken) {
+    return { error: "内容里没有登录凭证，请确认打开的是 chatgpt.com/api/auth/session" };
+  }
+  if (!obj.sessionToken) {
+    return { error: "登录信息不完整（缺少 sessionToken），请复制该页面的全部内容" };
+  }
+  const exp = obj.expires ? Date.parse(obj.expires) : NaN;
+  if (!Number.isNaN(exp) && exp < Date.now()) {
+    return { error: "登录信息已过期，请刷新那个页面后重新复制" };
+  }
+  return {
+    raw: JSON.stringify(obj),
+    email: obj.user?.email || "",
+    expires: Number.isNaN(exp) ? "" : new Date(exp).toLocaleDateString("zh-CN"),
+  };
 }
 
-$("#grabBtn").addEventListener("click", grabSession);
+function markGuide(n, done) {
+  $(`#gs${n}`)?.classList.toggle("done", !!done);
+}
+
+function validateSession() {
+  const r = parseSession($("#sessionInput").value);
+  const box = $("#sessionStatus");
+  state.session = r.raw ? r : null;
+  $("#subscribeBtn").disabled = !state.session;
+  markGuide(3, !!state.session);
+  if (r.empty) {
+    box.className = "session-status";
+    box.innerHTML = "";
+  } else if (r.error) {
+    box.className = "session-status bad";
+    box.textContent = r.error;
+  } else {
+    markGuide(1, true);
+    markGuide(2, true);
+    box.className = "session-status ok";
+    box.innerHTML = `<b>${esc(r.email || "已识别登录信息")}</b>`
+      + `<span>请确认这是要开通的账号${r.expires ? `，登录有效期至 ${esc(r.expires)}` : ""}。</span>`;
+  }
+  $("#sessionHint").textContent = "";
+}
+
+$("#sessionInput").addEventListener("input", validateSession);
+$("#openSessionBtn").addEventListener("click", () => markGuide(2, true));
+$("#pasteBtn").addEventListener("click", async () => {
+  try {
+    const text = await navigator.clipboard.readText();
+    $("#sessionInput").value = text;
+    validateSession();
+  } catch (e) {
+    // 部分浏览器不允许网页直接读剪贴板
+    const box = $("#sessionStatus");
+    box.className = "session-status bad";
+    box.textContent = "浏览器不允许直接读取剪贴板，请点击下方输入框，按 Ctrl/⌘ + V 粘贴";
+    $("#sessionInput").focus();
+  }
+});
 
 /* ------------------------------- 第三步 ------------------------------- */
-function updateTimeline(job) {
-  const order = ["login", "plan", "checkout", "card", "address", "submit"];
-  const idx = order.indexOf(job.step);
-  $$("#timeline li").forEach((li) => {
-    const k = li.dataset.k;
-    const i = order.indexOf(k);
-    li.className = "";
-    if (job.done) {
-      if (job.ok) li.className = "done";
-      else if (i < idx) li.className = "done";
-      else if (i === idx) li.className = "error";
-    } else {
-      if (i < idx) li.className = "done";
-      if (i === idx) li.className = "running";
-    }
-    li.querySelector("em").textContent = "";
-  });
-  if (job.step === "done") {
-    $$("#timeline li").forEach((li) => (li.className = "done"));
+// 把内部的技术报错翻译成客户能看懂、且不泄露实现细节的话术。
+function friendlyError(raw) {
+  const m = String(raw || "").toLowerCase();
+  if (/过期|expired|登录信息|session|sessiontoken|401|未登录/.test(m)) {
+    return "登录信息可能已失效，请返回重新获取后再试。";
   }
+  if (/当前套餐|已经是|already/.test(m)) {
+    return "这个账号可能已经是该套餐了，请确认后再试。";
+  }
+  // 其余一律给通用话术，不暴露内部步骤 / 报错
+  return "开通没有成功，可以返回重试，或联系客服处理。";
+}
+
+function finishJob(ok, raw) {
+  clearInterval(state.timer);
+  state.timer = null;
+  $("#processing").classList.add("hidden");
+  const box = $("#result");
+  box.classList.remove("hidden", "ok", "bad");
+  box.classList.add(ok ? "ok" : "bad");
+  box.innerHTML = ok
+    ? "<b>开通成功</b><br>订阅已提交，请回到 ChatGPT 查看。如果银行要求验证，请按提示完成。你的兑换码已使用。"
+    : `<b>暂时没有开通</b><br>${esc(friendlyError(raw))}<br>兑换码没有被使用，不会浪费。`;
+  $("#retryBtn").classList.toggle("hidden", ok);
 }
 
 async function pollJob() {
   try {
     const job = await api(`/api/job/${state.jobId}`);
-    updateTimeline(job);
-    $("#progressMsg").textContent = job.message || "处理中…";
-
+    // 只显示一个「处理中」，不暴露内部步骤
     if (job.done) {
-      clearInterval(state.timer);
-      const box = $("#result");
-      box.classList.remove("hidden", "ok", "bad");
-      box.classList.add(job.ok ? "ok" : "bad");
-      box.innerHTML = job.ok
-        ? `<b>订阅已提交</b><br>${esc(job.message || "")}<br>请回到 ChatGPT 页面确认订阅状态；若出现 3D Secure 验证，请在浏览器窗口内完成。`
-        : `<b>订阅未完成</b><br>${esc(job.message || "未知错误")}<br>可检查登录信息是否过期后重试。`;
-      $("#progressTitle").textContent = job.ok ? "完成" : "失败";
+      finishJob(!!job.ok, job.message);
     }
   } catch (e) {
-    clearInterval(state.timer);
-    $("#progressMsg").textContent = e.message;
+    // 轮询偶发失败不打断，继续等；真正结果以 job.done 为准
   }
 }
 
+$("#retryBtn").addEventListener("click", () => {
+  $("#result").classList.add("hidden");
+  $("#retryBtn").classList.add("hidden");
+  $("#processing").classList.remove("hidden");
+  setStep(2);
+});
+
 async function subscribe() {
-  const session = $("#sessionInput").value.trim();
-  if (!session) {
-    $("#sessionHint").textContent = "请先粘贴登录信息，或用上面的按钮一键获取";
-    $("#sessionHint").className = "muted";
+  validateSession();
+  if (!state.session) {
+    $("#sessionHint").textContent = "请先按上面 3 步获取并粘贴登录信息";
+    $("#sessionHint").className = "hint bad";
     return;
   }
+  const session = state.session.raw;
   const btn = $("#subscribeBtn");
   btn.classList.add("loading");
   btn.disabled = true;
@@ -203,20 +268,19 @@ async function subscribe() {
       body: JSON.stringify({ code: state.code, plan: state.plan, session }),
     });
     state.jobId = d.jobId;
+    $("#result").classList.add("hidden");
+    $("#retryBtn").classList.add("hidden");
+    $("#processing").classList.remove("hidden");
     setStep(3);
-    $("#progressTitle").textContent = "正在订阅…";
-    $("#progressMsg").textContent = "排队中，请保持页面打开";
     state.timer = setInterval(pollJob, 1500);
     pollJob();
   } catch (e) {
+    // 提交时的校验错误（兑换码无效 / 登录信息过期等）本身就是友好话术，直接显示
     $("#sessionHint").textContent = e.message;
-    $("#sessionHint").className = "muted";
+    $("#sessionHint").className = "hint bad";
     btn.classList.remove("loading");
     btn.disabled = false;
   }
 }
 
 $("#subscribeBtn").addEventListener("click", subscribe);
-
-/* ------------------------------- 启动 ------------------------------- */
-consumeHash();

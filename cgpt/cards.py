@@ -1,22 +1,10 @@
 """Stripe 卡信息与账单地址"""
-import base64
-import datetime
 import json
-import os
 import re
-import subprocess
 import time
-import urllib.parse
 
-import requests
-import websocket
-
-from .config import *  # noqa
-from .cdp import CDP, list_targets  # noqa
-from .plans import click_in_page  # noqa
-
-CHECKOUT_HINT = "/checkout/"
-
+from .cdp import CDP, list_targets
+from .plans import click_in_page
 
 CARD_FRAME_HINT = "js.stripe.com"
 
@@ -215,19 +203,9 @@ def reveal_billing(cdp, port, timeout=20):
     return {"clicked": clicked, "revealed": True}
 
 
-# --------------------------------------------------------------------------- #
-# 杂项
-# --------------------------------------------------------------------------- #
-
-
 def wait_card_ready(port, timeout=60):
     cdp = find_card_frame(port, timeout=timeout)
     if cdp is None:
         return False
     cdp.close()
     return True
-
-
-# --------------------------------------------------------------------------- #
-# 账单地址（Stripe 第二个子 frame）
-# --------------------------------------------------------------------------- #

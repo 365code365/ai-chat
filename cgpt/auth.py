@@ -2,17 +2,14 @@
 import base64
 import datetime
 import json
-import os
 import re
-import subprocess
 import time
-import urllib.parse
 
 import requests
-import websocket
 
-from .config import *  # noqa
-from .cdp import wait_page_ready  # noqa
+from .config import CHUNK, COOKIE_BASE, UA
+from .cdp import wait_page_ready
+
 
 def _b64json(part):
     part += "=" * (-len(part) % 4)
@@ -66,9 +63,8 @@ def check_access_token(token, timeout=20):
 
 
 # --------------------------------------------------------------------------- #
-# CDP
+# 浏览器会话 cookie
 # --------------------------------------------------------------------------- #
-
 
 def clear_session_cookies(cdp):
     for n in range(8):
@@ -137,9 +133,8 @@ def login_account(cdp, account, timeout=40):
 
 
 # --------------------------------------------------------------------------- #
-# 订阅页 / 套餐选择
+# 导入内容解析 / 时间
 # --------------------------------------------------------------------------- #
-
 
 def parse_session(raw):
     """

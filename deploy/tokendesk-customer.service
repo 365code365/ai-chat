@@ -1,0 +1,14 @@
+[Unit]
+Description=TokenDesk 客户兑换页
+After=network.target tokendesk-relay.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/gpt-buy
+Environment=TD_DATA_DIR=/opt/gpt-buy/data
+ExecStart=/opt/gpt-buy/.venv/bin/python customer_server.py --host 127.0.0.1 --port 8931
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

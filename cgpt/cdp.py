@@ -1,6 +1,5 @@
 """CDP 与浏览器进程"""
 import base64
-import datetime
 import json
 import os
 import re
@@ -11,7 +10,7 @@ import urllib.parse
 import requests
 import websocket
 
-from .config import *  # noqa
+from .config import CHROME
 
 class CDP(object):
     def __init__(self, ws_url, timeout=120):
@@ -67,7 +66,20 @@ def debugger_ready(port, timeout=1.5):
     return None
 
 
+def _headless_ua():
+    """无界面模式的默认 UA 带 HeadlessChrome 字样，换成同版本的普通 UA。"""
+    try:
+        out = subprocess.run([CHROME, "--version"], capture_output=True, text=True, timeout=10).stdout
+        ver = re.search(r"(\d+\.\d+\.\d+\.\d+)", out).group(1)
+    except Exception:
+        return ""
+    return ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/%s Safari/537.36" % ver)
+
+
 def launch_browser(port, profile, headless=False, log_path=None, extra_args=None):
+    if not CHROME or not os.path.exists(CHROME):
+        raise RuntimeError("没有找到浏览器（Chrome / Chromium），请先安装，或用 TD_CHROME 指定路径")
     cmd = [
         CHROME,
         "--no-sandbox",
@@ -76,10 +88,14 @@ def launch_browser(port, profile, headless=False, log_path=None, extra_args=None
         "--no-first-run",
         "--no-default-browser-check",
         "--window-size=1440,960",
+        "--disable-dev-shm-usage",
     ]
     cmd += list(extra_args or [])
     if headless:
         cmd += ["--headless=new", "--disable-gpu"]
+        ua = _headless_ua()
+        if ua:
+            cmd.append("--user-agent=%s" % ua)
     cmd.append("about:blank")
     log = open(log_path, "ab") if log_path else subprocess.DEVNULL
     proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT,
@@ -120,11 +136,6 @@ def close_tab(port, tab_id):
         pass
 
 
-# --------------------------------------------------------------------------- #
-# 登录态
-# --------------------------------------------------------------------------- #
-
-
 def list_targets(port):
     try:
         return _get("http://127.0.0.1:%d/json/list" % port, timeout=3).json()
@@ -150,10 +161,8 @@ def capture(cdp, path, rect=None):
 
 
 # --------------------------------------------------------------------------- #
-# 结账页（Stripe）
+# 等待工具
 # --------------------------------------------------------------------------- #
-
-
 def wait_page_ready(cdp, timeout=45):
     end = time.time() + timeout
     while time.time() < end:

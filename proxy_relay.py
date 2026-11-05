@@ -22,12 +22,11 @@ import select
 import socket
 import socketserver
 import struct
-import threading
-import time
 import urllib.parse
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-CONFIG_PATH = os.path.join(HERE, "data", "proxy.json")
+DATA_DIR = os.environ.get("TD_DATA_DIR") or os.path.join(HERE, "data")
+CONFIG_PATH = os.path.join(DATA_DIR, "proxy.json")
 DEFAULT_PORT = 8898
 
 _cache = {"mtime": 0, "upstream": ""}
@@ -173,10 +172,11 @@ def _open_via_socks(up, host, port):
     elif atyp == 0x04:
         sock.recv(16)
     sock.recv(2)
-    return sock
+    return sock, b""
 
 
 def open_target(host, port):
+    """返回 (已连通目标的 socket, 上游多读到的数据)。"""
     # 本机地址永远直连，避免把管理页/客户页也绕进代理
     if host in ("127.0.0.1", "localhost", "::1"):
         return socket.create_connection((host, port), timeout=20), b""
@@ -236,12 +236,14 @@ class Handler(socketserver.BaseRequestHandler):
                 return
             u = urllib.parse.urlparse(target)
             port = u.port or (443 if u.scheme == "https" else 80)
-            upstream = open_target(u.hostname, port)
+            upstream, rest = open_target(u.hostname, port)
             leftover = head.split(b"\r\n", 1)[1] if b"\r\n" in head else b""
             path = u.path or "/"
             if u.query:
                 path += "?" + u.query
             upstream.sendall(("%s %s HTTP/1.1\r\n" % (method, path)).encode() + leftover)
+            if rest:
+                client.sendall(rest)
             _pipe(client, upstream)
             upstream.close()
         except Exception:

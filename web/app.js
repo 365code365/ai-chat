@@ -66,9 +66,122 @@ function remain(exp) {
 }
 
 /* ------------------------------- 登录 ------------------------------- */
+const captchaState = { id: null, type: null, solved: false, payload: null };
+
+async function loadCaptcha() {
+  const box = $("#captchaBox");
+  if (!box) return;
+  captchaState.id = null;
+  captchaState.solved = false;
+  captchaState.payload = null;
+  box.className = "captcha";
+  box.innerHTML = `<div class="cap-loading">加载校验…</div>`;
+  try {
+    const d = await api("/api/captcha");
+    captchaState.id = d.id;
+    captchaState.type = d.type;
+    if (d.type === "text") renderTextCaptcha(d);
+    else renderSliderCaptcha(d);
+  } catch (e) {
+    box.innerHTML = `<div class="cap-loading" id="capRetry">校验加载失败，点此重试</div>`;
+    $("#capRetry").addEventListener("click", loadCaptcha);
+  }
+}
+
+const REFRESH_ICON = `<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor"
+  stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 1 0-2.3 5.7"/>
+  <path d="M20 4v7h-7"/></svg>`;
+const ARROW_ICON = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor"
+  stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>`;
+const CHECK_ICON = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor"
+  stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>`;
+
+function renderTextCaptcha(d) {
+  const box = $("#captchaBox");
+  box.className = "captcha is-text";
+  box.innerHTML = `
+    <div class="cap-img">${d.image}
+      <button type="button" class="cap-refresh" id="capRefresh" title="换一张" aria-label="换一张">${REFRESH_ICON}</button>
+    </div>
+    <input id="capInput" class="cap-input" placeholder="输入图中 4 位字符"
+           autocomplete="off" maxlength="4" spellcheck="false" />`;
+  const inp = $("#capInput");
+  inp.addEventListener("input", () => {
+    inp.value = inp.value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 4);
+    captchaState.solved = inp.value.length >= 4;
+    captchaState.payload = { text: inp.value };
+    box.classList.toggle("done", captchaState.solved);
+  });
+  inp.addEventListener("keydown", (e) => { if (e.key === "Enter") doLogin(); });
+  $("#capRefresh").addEventListener("click", loadCaptcha);
+}
+
+function renderSliderCaptcha(d) {
+  const box = $("#captchaBox");
+  box.className = "captcha is-slider";
+  const W = d.trackWidth, H = d.trackHeight, P = d.piece;
+  const pieceW = (P / W) * 100;          // 方块宽度占图片宽度的百分比
+  box.innerHTML = `
+    <div class="cap-stage" style="aspect-ratio:${W} / ${H}">
+      <div class="cap-bg">${d.image}</div>
+      <div class="cap-piece" id="capPiece" style="width:${pieceW}%;top:${(d.pieceY / H) * 100}%;left:0"></div>
+      <button type="button" class="cap-refresh" id="capRefresh" title="换一张" aria-label="换一张">${REFRESH_ICON}</button>
+    </div>
+    <div class="cap-track" id="capTrack">
+      <div class="cap-fill" id="capFill"></div>
+      <span class="cap-track-text" id="capTip">按住滑块，拖动完成拼图</span>
+      <div class="cap-handle" id="capHandle">${ARROW_ICON}</div>
+    </div>`;
+
+  const track = $("#capTrack"), handle = $("#capHandle");
+  const piece = $("#capPiece"), fill = $("#capFill");
+  // 进度 r ∈ [0,1]：手柄走完轨道 = 方块走完图片。提交给服务端的是图片坐标系里的 x。
+  const setProgress = (r) => {
+    const travel = track.clientWidth - handle.offsetWidth;
+    handle.style.left = r * travel + "px";
+    fill.style.width = r * travel + handle.offsetWidth / 2 + "px";
+    piece.style.left = r * (100 - pieceW) + "%";
+    captchaState.payload = { x: Math.round(r * (W - P) * 10) / 10 };
+  };
+
+  handle.addEventListener("pointerdown", (e) => {
+    if (captchaState.solved) return;
+    handle.setPointerCapture(e.pointerId);
+    track.classList.add("dragging");
+    const startX = e.clientX;
+    let r = 0;
+    const onMove = (ev) => {
+      const travel = track.clientWidth - handle.offsetWidth;
+      r = Math.max(0, Math.min(1, (ev.clientX - startX) / travel));
+      setProgress(r);
+    };
+    const onUp = () => {
+      handle.removeEventListener("pointermove", onMove);
+      handle.removeEventListener("pointerup", onUp);
+      handle.removeEventListener("pointercancel", onUp);
+      track.classList.remove("dragging");
+      if (r < 0.02) { setProgress(0); return; }     // 没拖动，不算一次作答
+      captchaState.solved = true;
+      track.classList.add("done");
+      handle.innerHTML = CHECK_ICON;
+      if ($("#loginPass").value) {
+        $("#capTip").textContent = "验证中…";
+        doLogin();
+      } else {
+        $("#capTip").textContent = "已完成，输入密码后点登录";
+      }
+    };
+    handle.addEventListener("pointermove", onMove);
+    handle.addEventListener("pointerup", onUp);
+    handle.addEventListener("pointercancel", onUp);
+  });
+  $("#capRefresh").addEventListener("click", loadCaptcha);
+}
+
 function showLogin() {
   $("#loginWrap").classList.remove("hidden");
   $("#appRoot").classList.add("hidden");
+  loadCaptcha();
   setTimeout(() => $("#loginPass").focus(), 80);
 }
 
@@ -81,17 +194,29 @@ function hideLogin(user) {
 async function doLogin() {
   const user = $("#loginUser").value.trim();
   const password = $("#loginPass").value;
-  const btn = $("#loginBtn");
   $("#loginErr").textContent = "";
+  if (!captchaState.id || !captchaState.solved) {
+    $("#loginErr").textContent = "请先完成人机校验";
+    return;
+  }
+  if (!password) {
+    $("#loginErr").textContent = "请输入密码";
+    return;
+  }
+  const btn = $("#loginBtn");
   busy(btn, true);
   try {
-    const d = await api("/api/login", { method: "POST", body: JSON.stringify({ user, password }) });
+    const d = await api("/api/login", {
+      method: "POST",
+      body: JSON.stringify({ user, password, captchaId: captchaState.id, captcha: captchaState.payload }),
+    });
     hideLogin(d.user);
     await loadAll();
     if (typeof loadProxy === "function") loadProxy();
     toast("已登录", "ok");
   } catch (e) {
     $("#loginErr").textContent = e.message;
+    loadCaptcha();            // 任何失败都换一张，防止重放
   } finally {
     busy(btn, false);
   }
@@ -196,9 +321,26 @@ function renderAccounts() {
   renderStatus();
 }
 
+// 卡组织标识（与客户页一致）
+const BRAND_LOGO = {
+  visa: '<span class="logo-visa">VISA</span>',
+  mastercard: '<svg viewBox="0 0 26 16" width="24" height="15" aria-label="Mastercard">'
+    + '<circle cx="9" cy="8" r="7" fill="#EB001B"/><circle cx="17" cy="8" r="7" fill="#F79E1B"/>'
+    + '<path d="M13 2.26A7 7 0 0 1 13 13.74A7 7 0 0 1 13 2.26Z" fill="#FF5F00"/></svg>',
+  amex: '<span class="logo-amex">AMEX</span>',
+  jcb: '<span class="logo-text" style="color:#0b6b3a">JCB</span>',
+  unionpay: '<span class="logo-text" style="color:#c81f26">银联</span>',
+  discover: '<span class="logo-text" style="color:#e35205">DISC</span>',
+  diners: '<span class="logo-text" style="color:#0b3d91">DINERS</span>',
+  card: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="#a1a1aa" stroke-width="1.7">'
+    + '<rect x="3" y="6" width="18" height="12" rx="2"/><path d="M3 10h18"/></svg>',
+};
+const brandLogo = (key) => BRAND_LOGO[key] || BRAND_LOGO.card;
+
+const TRASH_ICON = `<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7">
+  <path d="M5 7h14M10 7V5h4v2M7.5 7l.8 12h7.4l.8-12" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+
 function cardRow(c) {
-  const brandMap = { visa: "VISA", mastercard: "MC", amex: "AMEX", jcb: "JCB",
-    unionpay: "UP", discover: "DISC", card: "CARD" };
   const boundIds = c.accountIds || [];
   const chips = (c.accounts || []).map((a) =>
     `<span class="bind-chip">${esc(a.email)}
@@ -207,54 +349,58 @@ function cardRow(c) {
   const menu = state.accounts.map((a) =>
     `<label><input type="checkbox" data-bindacc="${esc(c.id)}" value="${esc(a.id)}"
        ${boundIds.includes(a.id) ? "checked" : ""}> ${esc(a.email)}</label>`).join("");
+  const cs = c.codeState || "active";
+  const status = {
+    active: '<span class="status ok">可用</span>',
+    used: '<span class="status warn">已兑换</span>',
+    revoked: '<span class="status bad">已作废</span>',
+  }[cs] || "";
+  const sub = [c.exp, c.holder, c.label].filter(Boolean).map(esc).join(" · ");
 
   return `
-  <div class="card-row ${c.status === "used" ? "used" : ""}" data-id="${esc(c.id)}">
-    <div class="brand-chip ${esc(c.brand)}">${brandMap[c.brand] || "CARD"}</div>
-    <div class="card-main">
-      <div class="card-num">${esc(c.masked)}</div>
-      <div class="card-plans">
-        <span>可用套餐</span>
-        ${["plus", "pro"].map((pl) => `
-          <label class="plan-toggle ${(c.plans || []).includes(pl) ? "on" : ""}">
-            <input type="checkbox" data-cardplan="${esc(c.id)}" value="${pl}"
-              ${(c.plans || []).includes(pl) ? "checked" : ""} /> ${pl === "plus" ? "Plus" : "Pro"}
-          </label>`).join("")}
-      </div>
-      <div class="card-code">
-        <span>兑换码</span>
-        <code>${esc(c.code || "—")}</code>
-        <button class="mini" data-act="copy-code" data-id="${esc(c.id)}" data-code="${esc(c.code || "")}">复制</button>
-        <button class="mini" data-act="rotate-code" data-id="${esc(c.id)}">重置</button>
-        ${c.codeUsedAt ? '<i class="used-tag">已兑换</i>' : ""}
-      </div>
-      <div class="card-sub">
-        ${c.label ? `<span>${esc(c.label)}</span><span class="sep">/</span>` : ""}
-        <span>${esc(c.exp)}</span>
-        ${c.holder ? `<span class="sep">/</span><span>${esc(c.holder)}</span>` : ""}
-        ${c.lastUsedAt ? `<span class="sep">/</span><span>用过</span>` : ""}
+  <div class="card-row ${cs !== "active" ? "is-dim" : ""}" data-id="${esc(c.id)}">
+    <div class="cr-card">
+      <span class="brand-chip">${brandLogo(c.brand)}</span>
+      <div class="cr-card-text">
+        <div class="card-num">•••• ${esc(c.last4)}</div>
+        <div class="card-sub">${sub || "—"}</div>
       </div>
     </div>
-    <div class="bind-area">
+    <div class="cr-plans">
+      ${["plus", "pro"].map((pl) => `
+        <label class="plan-toggle ${(c.plans || []).includes(pl) ? "on" : ""}">
+          <input type="checkbox" data-cardplan="${esc(c.id)}" value="${pl}"
+            ${(c.plans || []).includes(pl) ? "checked" : ""} />${pl === "plus" ? "Plus" : "Pro"}
+        </label>`).join("")}
+    </div>
+    <div class="cr-code">
+      <div class="code-line"><code class="code-${esc(cs)}">${esc(c.code || "—")}</code>${status}</div>
+      <div class="code-actions">
+        <button class="mini" data-act="copy-code" data-id="${esc(c.id)}" data-code="${esc(c.code || "")}">复制</button>
+        <button class="mini" data-act="rotate-code" data-id="${esc(c.id)}">换新码</button>
+        ${cs !== "used"
+          ? `<button class="mini" data-act="toggle-code" data-id="${esc(c.id)}" data-revoked="${cs === "revoked" ? 1 : ""}">${cs === "revoked" ? "启用" : "作废"}</button>`
+          : ""}
+      </div>
+    </div>
+    <div class="cr-bind bind-area">
       ${chips}
       <details class="bind-add">
-        <summary>+ 绑定账号</summary>
+        <summary>${chips ? "修改" : "绑定账号"}</summary>
         <div class="bind-menu">${menu || "<div class='muted small' style='padding:8px'>还没有账号</div>"}</div>
       </details>
     </div>
-    <div class="card-actions">
-      <button class="btn ghost tiny" data-act="copy-card" data-id="${esc(c.id)}" title="复制完整卡信息，直接粘贴到支付表单">复制卡</button>
-      <button class="icon-btn danger" data-act="del-card" data-id="${esc(c.id)}" title="删除">
-        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8">
-          <path d="M6 7h12M9.5 7V5.5h5V7M8 7l.7 12h6.6L16 7" stroke-linecap="round" stroke-linejoin="round"/>
-        </svg>
-      </button>
+    <div class="cr-actions card-actions">
+      <button class="mini" data-act="copy-card" data-id="${esc(c.id)}" title="复制卡号、有效期和 CVC">复制卡号</button>
+      <button class="icon-btn danger" data-act="del-card" data-id="${esc(c.id)}" title="删除">${TRASH_ICON}</button>
     </div>
   </div>`;
 }
 
+const CARD_HEAD = `<div class="card-head"><span>卡片</span><span>可用套餐</span><span>兑换码</span><span>绑定账号</span><span></span></div>`;
+
 function renderCards() {
-  $("#cardList").innerHTML = state.cards.map(cardRow).join("");
+  $("#cardList").innerHTML = state.cards.length ? CARD_HEAD + state.cards.map(cardRow).join("") : "";
   $("#navCardCount").textContent = state.cards.length;
   $("#cardEmpty").classList.toggle("hidden", state.cards.length > 0);
 }
@@ -347,6 +493,13 @@ $("#startBrowserBtn").addEventListener("click", async () => {
     toast("浏览器已就绪", "ok");
   } catch (e) { toast(e.message, "bad"); }
 });
+
+/* ------------------------------- 客户兑换页链接 ------------------------------- */
+// 本地：管理端 8899 → 兑换页 8900；线上：管理端 :9443 → 兑换页是同域名的 443（根路径）
+const CUSTOMER_URL = location.port === "8899"
+  ? `${location.protocol}//${location.hostname}:8900/`
+  : `${location.protocol}//${location.hostname}/`;
+$("#customerLink").href = CUSTOMER_URL;
 
 /* ------------------------------- 导入 ------------------------------- */
 const ADMIN_URL = location.origin;
@@ -469,21 +622,32 @@ function luhnOk(num) {
   return sum % 10 === 0;
 }
 
-function brandOf(num) {
-  if (/^4/.test(num)) return "VISA";
-  if (/^(5[1-5]|2(2[2-9]|[3-6]\d|7[01]|720))/.test(num)) return "MASTERCARD";
-  if (/^3[47]/.test(num)) return "AMEX";
-  if (/^35/.test(num)) return "JCB";
-  if (/^(62|81)/.test(num)) return "UNIONPAY";
-  return "CARD";
+// 按卡 BIN（前缀）识别发卡组织，与后端 store.card_brand 保持一致
+function detectBrand(num) {
+  const n = (num || "").replace(/\D/g, "");
+  if (!n) return { key: "card", label: "CARD" };
+  const two = +n.slice(0, 2);
+  const three = +n.slice(0, 3);
+  const four = +n.slice(0, 4);
+  if (n[0] === "4") return { key: "visa", label: "VISA" };
+  if ((two >= 51 && two <= 55) || (four >= 2221 && four <= 2720)) return { key: "mastercard", label: "MASTERCARD" };
+  if (two === 34 || two === 37) return { key: "amex", label: "AMEX" };
+  if (four >= 3528 && four <= 3589) return { key: "jcb", label: "JCB" };
+  if (two === 62 || two === 81) return { key: "unionpay", label: "UNIONPAY" };
+  if (/^6011/.test(n) || two === 65 || (three >= 644 && three <= 649)) return { key: "discover", label: "DISCOVER" };
+  if (two === 36 || two === 38 || (three >= 300 && three <= 305)) return { key: "diners", label: "DINERS" };
+  return { key: "card", label: "CARD" };
 }
 
 function updatePreview() {
   const num = $("#newNumber").value.replace(/\D/g, "");
+  const brand = detectBrand(num);
   $("#cpNum").textContent = num
     ? num.replace(/(.{4})/g, "$1 ").trim().padEnd(19, "•")
     : "•••• •••• •••• ••••";
-  $("#cpBrand").textContent = brandOf(num);
+  $("#cpBrand").innerHTML = num ? brandLogo(brand.key) : "";
+  $("#cpBrand").classList.toggle("on", !!num);
+  $("#cpBrandName").textContent = num && brand.key !== "card" ? brand.label : "";
   $("#cpExp").textContent = $("#newExp").value || "MM/YY";
   $("#cpHolder").textContent = $("#newHolder").value || "持卡人";
 
@@ -615,10 +779,21 @@ $("#cardList").addEventListener("click", async (e) => {
     return;
   }
   if (btn.dataset.act === "rotate-code") {
-    if (!confirm("重置后旧兑换码立即失效，继续？")) return;
+    if (!confirm("换新码后旧兑换码立即失效（含已兑换/已作废的），继续？")) return;
     try {
       await api(`/api/cards/${encodeURIComponent(id)}/rotate-code`, { method: "POST" });
       toast("已生成新兑换码", "ok");
+      await loadAll();
+    } catch (err) { toast(err.message, "bad"); }
+    return;
+  }
+  if (btn.dataset.act === "toggle-code") {
+    const revoke = !btn.dataset.revoked;   // 当前已作废则启用，否则作废
+    try {
+      await api(`/api/cards/${encodeURIComponent(id)}/revoke-code`, {
+        method: "POST", body: JSON.stringify({ revoked: revoke }),
+      });
+      toast(revoke ? "兑换码已作废" : "兑换码已启用", "ok");
       await loadAll();
     } catch (err) { toast(err.message, "bad"); }
     return;
@@ -991,8 +1166,21 @@ async function consumeHashImport() {
 }
 
 /* ------------------------------- 启动 ------------------------------- */
-consumeHashImport().catch(() => {});
+(async function boot() {
+  try {
+    const s = await api("/api/session");
+    if (s && s.ok) {
+      hideLogin(s.user);
+      await consumeHashImport().catch(() => {});
+      await loadAll();
+      if (typeof loadProxy === "function") loadProxy();
+    } else {
+      showLogin();
+    }
+  } catch (e) {
+    showLogin();
+  }
+})();
 window.addEventListener("hashchange", () => consumeHashImport().catch(() => {}));
-loadAll().catch((e) => toast(`加载失败：${e.message}`, "bad"));
 setInterval(refreshStatus, 15000);
 setInterval(() => { renderAccounts(); }, 60000);

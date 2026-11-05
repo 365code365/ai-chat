@@ -1,18 +1,10 @@
 """定价页与套餐弹窗"""
-import base64
-import datetime
 import json
-import os
-import re
-import subprocess
 import time
 import urllib.parse
 
-import requests
-import websocket
-
-from .config import *  # noqa
-from .cdp import CDP, capture, list_targets, wait_for, wait_page_ready  # noqa
+from .config import CHECKOUT_HINT
+from .cdp import capture, list_targets, wait_for, wait_page_ready
 
 PRICING_URL = "https://chatgpt.com/pricing"
 

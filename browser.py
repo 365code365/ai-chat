@@ -1,7 +1,5 @@
 """browser.py — 共享的独立 Chrome 实例（管理端与客户页复用）。"""
 import os
-import time
-
 import socket
 import subprocess
 import time
@@ -9,7 +7,9 @@ import time
 import cgpt
 from store import SHOT_DIR
 
+HERE = os.path.dirname(os.path.abspath(__file__))
 BROWSER_PORT = 9333
+BROWSER_PROFILE = os.path.join(HERE, ".chrome-gpt-profile")
 RELAY_PORT = 8898
 
 
@@ -19,8 +19,7 @@ def relay_alive(port=RELAY_PORT, timeout=0.6):
             return True
     except OSError:
         return False
-HERE = os.path.dirname(os.path.abspath(__file__))
-BROWSER_PROFILE = os.path.join(HERE, ".chrome-gpt-profile")
+
 
 class Browser(object):
     def __init__(self):
@@ -46,7 +45,7 @@ class Browser(object):
             extra = ["--proxy-server=http://127.0.0.1:%d" % RELAY_PORT,
                      "--proxy-bypass-list=127.0.0.1;localhost;::1"]
         self.proc = cgpt.launch_browser(
-            self.port, self.profile, headless=False,
+            self.port, self.profile, headless=cgpt.HEADLESS,
             log_path=os.path.join(HERE, "chrome.log"), extra_args=extra,
         )
         self.started_at = time.time()
@@ -237,9 +236,6 @@ class Browser(object):
         res["screenshotUrl"] = "/api/shots/%s-%s.png?t=%d" % (acc["id"], plan, int(time.time()))
         res["email"] = self.current_email
         return res
-
-
-BROWSER = Browser()
 
 
 BROWSER = Browser()

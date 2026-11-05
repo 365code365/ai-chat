@@ -4,21 +4,19 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>TokenDesk · ChatGPT 账号与卡库</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230d0d0d'/%3E%3Crect x='11' y='11' width='10' height='10' rx='3' fill='white'/%3E%3C/svg%3E" />
 <link rel="stylesheet" href="/style.css" />
 </head>
 <body>
 <div class="login-wrap" id="loginWrap">
   <div class="login-card">
-    <div class="mark">
-      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.9">
-        <rect x="4.5" y="10" width="15" height="10" rx="2.5"/><path d="M8 10V7.5a4 4 0 0 1 8 0V10"/>
-      </svg>
-    </div>
-    <h2>管理端登录</h2>
-    <p>账号、卡库与兑换码仅限授权人员访问</p>
+    <div class="login-brand"><span class="mark-sq"></span>TokenDesk</div>
+    <h2>登录管理后台</h2>
+    <p>仅限授权人员使用</p>
     <div class="field"><span>用户名</span><input id="loginUser" value="admin" autocomplete="username" /></div>
     <div class="field"><span>密码</span><input id="loginPass" type="password" autocomplete="current-password" /></div>
-    <button class="btn primary" id="loginBtn">登录</button>
+    <div class="field"><span>人机校验</span><div class="captcha" id="captchaBox"></div></div>
+    <button class="btn primary block" id="loginBtn">登录</button>
     <div class="login-err" id="loginErr"></div>
   </div>
 </div>
@@ -27,18 +25,7 @@
 
   <!-- ───────────── 侧边栏 ───────────── -->
   <aside class="rail">
-    <div class="brand">
-      <div class="mark">
-        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.9">
-          <path d="M12 3l7.5 4.3v9.4L12 21l-7.5-4.3V7.3z" stroke-linejoin="round"/>
-          <path d="M12 8.2l3.4 1.9v3.8L12 15.8l-3.4-1.9v-3.8z" stroke-linejoin="round"/>
-        </svg>
-      </div>
-      <div class="brand-text">
-        <b>TokenDesk</b>
-        <span>账号 · 卡库 · 订阅</span>
-      </div>
-    </div>
+    <div class="brand"><span class="mark-sq"></span><b>TokenDesk</b></div>
 
     <nav class="nav">
       <button class="nav-item active" data-view="accounts">
@@ -84,7 +71,7 @@
         </div>
       </div>
       <button class="btn tiny ghost block" id="startBrowserBtn">启动浏览器</button>
-      <a class="rail-link" href="http://127.0.0.1:8900/" target="_blank" rel="noopener">
+      <a class="rail-link" id="customerLink" href="/" target="_blank" rel="noopener">
         客户兑换页 ↗
       </a>
       <div class="user-box">
@@ -102,7 +89,7 @@
       <header class="page-head">
         <div>
           <h1>账号</h1>
-          <p>粘贴 token 即可接管；登录态、套餐、绑卡一站式管理。</p>
+          <p>已导入的 ChatGPT 账号、当前套餐和登录状态。</p>
         </div>
         <div class="head-actions">
           <div class="search">
@@ -125,7 +112,7 @@
           </svg>
         </div>
         <h3>还没有账号</h3>
-        <p>把导出的 session JSON 贴进来，或在 ChatGPT 页面用书签一键导入。</p>
+        <p>粘贴 ChatGPT 的 session JSON，或在 ChatGPT 页面用书签导入。</p>
         <button class="btn primary" data-goto="import">去导入</button>
       </div>
     </section>
@@ -134,7 +121,7 @@
       <header class="page-head">
         <div>
           <h1>卡库</h1>
-          <p>卡与账号绑定后，订阅时直接取用，不用再手输。</p>
+          <p>每张卡对应一个兑换码。兑换码使用一次后自动失效。</p>
         </div>
         <div class="head-actions">
           <button class="btn primary" id="addCardBtn">+ 添加卡</button>
@@ -150,7 +137,7 @@
           </svg>
         </div>
         <h3>卡库是空的</h3>
-        <p>添加一张卡，绑定到账号后，去结账时一键填入。</p>
+        <p>添加一张卡后会自动生成兑换码，把兑换码发给客户即可。</p>
         <button class="btn primary" id="addCardBtn2">+ 添加第一张卡</button>
       </div>
     </section>
@@ -159,7 +146,7 @@
       <header class="page-head">
         <div>
           <h1>导入账号</h1>
-          <p>支持完整 session JSON、只贴 accessToken，或从 ChatGPT 页面一键抓取。</p>
+          <p>支持完整 session JSON 或单独的 accessToken。</p>
         </div>
       </header>
 
@@ -192,7 +179,7 @@
           </ol>
           <p class="muted small">
             原理：书签在 chatgpt.com 页面里读取你自己的 session，把数据放在本页地址的
-            <code>#import=</code> 片段里跳回 <code>127.0.0.1:8899</code>，数据不经过任何服务器。
+            <code>#import=</code> 片段里跳回当前管理台，数据只发给本管理台，不经过第三方。
           </p>
         </div>
       </div>
@@ -202,7 +189,7 @@
       <header class="page-head">
         <div>
           <h1>代理</h1>
-          <p>登录、订阅、结账都会走这里配置的出口 IP（浏览器级生效）。</p>
+          <p>浏览器的登录、订阅和结账流量都经过这里配置的出口。</p>
         </div>
       </header>
 
@@ -245,7 +232,7 @@
 
     <section class="view" id="view-help" hidden>
       <header class="page-head">
-        <div><h1>说明</h1><p>几条使用与安全边界。</p></div>
+        <div><h1>说明</h1><p>使用方法和注意事项。</p></div>
       </header>
       <div class="panel help">
         <h3>购买链路</h3>
@@ -375,11 +362,17 @@
     <div class="modal-body">
       <div class="card-preview" id="cardPreview">
         <div class="cp-top">
-          <span class="cp-brand" id="cpBrand">CARD</span>
-          <span class="cp-exp" id="cpExp">MM/YY</span>
+          <span class="cp-chip"></span>
+          <span class="cp-brand-name" id="cpBrandName"></span>
         </div>
         <div class="cp-num" id="cpNum">•••• •••• •••• ••••</div>
-        <div class="cp-holder" id="cpHolder">持卡人</div>
+        <div class="cp-bottom">
+          <div class="cp-meta">
+            <span class="cp-holder" id="cpHolder">持卡人</span>
+            <span class="cp-exp" id="cpExp">MM/YY</span>
+          </div>
+          <span class="cp-brand" id="cpBrand"></span>
+        </div>
       </div>
 
       <div class="field-grid">

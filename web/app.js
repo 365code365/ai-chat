@@ -392,6 +392,7 @@ function cardRow(c) {
       </details>
     </div>
     <div class="cr-actions card-actions">
+      <button class="mini" data-act="edit-card" data-id="${esc(c.id)}">编辑</button>
       <button class="mini" data-act="copy-card" data-id="${esc(c.id)}" title="复制卡号、有效期和 CVC">复制卡号</button>
       <button class="icon-btn danger" data-act="del-card" data-id="${esc(c.id)}" title="删除">${TRASH_ICON}</button>
     </div>
@@ -684,19 +685,72 @@ function fillCountrySelect(sel, selected) {
 }
 
 /* ------------------------------- 卡库 ------------------------------- */
-function openCardModal(accountId) {
-  fillCountrySelect($("#newCountry"), $("#newCountry").value || "JP");
-  $("#cardModal").classList.remove("hidden");
-  $("#scrim").classList.add("on");
+const CARD_TEXT_INPUTS = ["#newExp", "#newCvc", "#newHolder", "#newPostal",
+  "#newState", "#newCity", "#newLine1", "#newLabel"];
+
+function fillPlans(selected) {
+  const sel = selected && selected.length ? selected : ["plus", "pro"];
   $("#newPlans").innerHTML = ["plus", "pro"].map((pl) =>
-    `<label><input type="checkbox" value="${pl}" checked> ${pl === "plus" ? "Plus" : "Pro"}</label>`
+    `<label><input type="checkbox" value="${pl}" ${sel.includes(pl) ? "checked" : ""}> ${pl === "plus" ? "Plus" : "Pro"}</label>`
   ).join("");
+}
+
+function fillAccountsChecklist(checkedIds) {
+  const set = new Set(checkedIds || []);
   $("#newAccounts").innerHTML = state.accounts.length
     ? state.accounts.map((a) =>
-        `<label><input type="checkbox" value="${esc(a.id)}"
-          ${accountId === a.id ? "checked" : ""}> ${esc(a.email)}</label>`).join("")
+        `<label><input type="checkbox" value="${esc(a.id)}" ${set.has(a.id) ? "checked" : ""}> ${esc(a.email)}</label>`).join("")
     : `<div class="muted small" style="padding:8px">还没有账号</div>`;
+}
+
+function showCardModal() {
+  $("#cardModal").classList.remove("hidden");
+  $("#scrim").classList.add("on");
+}
+
+// 新增卡
+function openCardModal(accountId) {
+  state.editId = null;
+  state.editLast4 = "";
+  state.editBrand = "card";
+  $("#cardModalTitle").textContent = "添加卡";
+  $("#cardSave").textContent = "保存到卡库";
+  $("#newNumber").value = "";
+  $("#newNumber").placeholder = "1234 1234 1234 1234";
+  $("#newCvc").placeholder = "CVC";
+  CARD_TEXT_INPUTS.forEach((s) => ($(s).value = ""));
+  fillCountrySelect($("#newCountry"), "JP");
+  fillPlans(["plus", "pro"]);
+  fillAccountsChecklist(accountId ? [accountId] : []);
+  updatePreview();
+  showCardModal();
   setTimeout(() => $("#newNumber").focus(), 60);
+}
+
+// 编辑卡：卡号/安全码留空＝不改，其余回显
+function openCardEdit(c) {
+  state.editId = c.id;
+  state.editLast4 = c.last4 || "";
+  state.editBrand = c.brand || "card";
+  $("#cardModalTitle").textContent = "编辑卡";
+  $("#cardSave").textContent = "保存修改";
+  $("#newNumber").value = "";
+  $("#newNumber").placeholder = `留空＝不改（当前 •••• ${c.last4 || "••••"}）`;
+  $("#newCvc").value = "";
+  $("#newCvc").placeholder = "留空＝不改";
+  $("#newExp").value = c.exp || "";
+  $("#newHolder").value = c.holder || "";
+  $("#newPostal").value = c.postal || "";
+  $("#newState").value = c.state || "";
+  $("#newCity").value = c.city || "";
+  $("#newLine1").value = c.line1 || "";
+  $("#newLabel").value = c.label || "";
+  fillCountrySelect($("#newCountry"), c.country || "JP");
+  fillPlans(c.plans);
+  fillAccountsChecklist(c.accountIds);
+  updatePreview();
+  showCardModal();
+  setTimeout(() => $("#newHolder").focus(), 60);
 }
 
 function closeCardModal() {
@@ -741,11 +795,14 @@ function detectBrand(num) {
 function updatePreview() {
   const num = $("#newNumber").value.replace(/\D/g, "");
   const brand = detectBrand(num);
+  // 编辑模式下卡号留空时，用现有卡的后四位与品牌占位
+  const editMasked = !num && state.editId && state.editLast4;
+  const key = num ? brand.key : (editMasked ? (state.editBrand || "card") : "card");
   $("#cpNum").textContent = num
     ? num.replace(/(.{4})/g, "$1 ").trim().padEnd(19, "•")
-    : "•••• •••• •••• ••••";
-  $("#cpBrand").innerHTML = num ? brandLogo(brand.key) : "";
-  $("#cpBrand").classList.toggle("on", !!num);
+    : (editMasked ? "•••• •••• •••• " + state.editLast4 : "•••• •••• •••• ••••");
+  $("#cpBrand").innerHTML = (num || editMasked) ? brandLogo(key) : "";
+  $("#cpBrand").classList.toggle("on", !!(num || editMasked));
   $("#cpBrandName").textContent = num && brand.key !== "card" ? brand.label : "";
   $("#cpExp").textContent = $("#newExp").value || "MM/YY";
   $("#cpHolder").textContent = $("#newHolder").value || "持卡人";
@@ -777,10 +834,12 @@ $("#newCvc").addEventListener("input", (e) => {
 });
 
 $("#cardSave").addEventListener("click", async () => {
+  const numRaw = $("#newNumber").value.replace(/\D/g, "");
+  const cvcRaw = $("#newCvc").value.replace(/\D/g, "");
+  const plans = [...document.querySelectorAll("#newPlans input:checked")].map((x) => x.value);
+  if (!plans.length) return toast("至少勾选一个可用套餐", "bad");
   const payload = {
-    number: $("#newNumber").value,
-    exp: $("#newExp").value,
-    cvc: $("#newCvc").value,
+    exp: $("#newExp").value.trim(),
     holder: $("#newHolder").value.trim(),
     country: $("#newCountry").value,
     postal: $("#newPostal").value.trim(),
@@ -789,20 +848,32 @@ $("#cardSave").addEventListener("click", async () => {
     line1: $("#newLine1").value.trim(),
     label: $("#newLabel").value.trim(),
     accountIds: [...document.querySelectorAll("#newAccounts input:checked")].map((x) => x.value),
-    plans: [...document.querySelectorAll("#newPlans input:checked")].map((x) => x.value),
+    plans,
   };
-  if (!payload.number.replace(/\D/g, "") || !payload.exp || !payload.cvc) {
-    return toast("卡号 / 有效期 / 安全码必填", "bad");
+  const editing = !!state.editId;
+  if (editing) {
+    if (numRaw) payload.number = numRaw;   // 留空＝不改
+    if (cvcRaw) payload.cvc = cvcRaw;
+  } else {
+    if (!numRaw || !payload.exp || !cvcRaw) {
+      return toast("卡号 / 有效期 / 安全码必填", "bad");
+    }
+    payload.number = numRaw;
+    payload.cvc = cvcRaw;
   }
   const btn = $("#cardSave");
   busy(btn, true);
   try {
-    await api("/api/cards", { method: "POST", body: JSON.stringify(payload) });
-    toast("已保存到卡库", "ok");
+    if (editing) {
+      await api(`/api/cards/${encodeURIComponent(state.editId)}`, {
+        method: "PATCH", body: JSON.stringify(payload),
+      });
+      toast("已保存修改", "ok");
+    } else {
+      await api("/api/cards", { method: "POST", body: JSON.stringify(payload) });
+      toast("已添加到卡库", "ok");
+    }
     closeCardModal();
-    $$("#newNumber, #newExp, #newCvc, #newHolder, #newPostal, #newState, #newCity, #newLine1, #newLabel")
-      .forEach((el) => (el.value = ""));
-    updatePreview();
     await loadAll();
     setView("cards");
   } catch (e) {
@@ -852,6 +923,11 @@ $("#cardList").addEventListener("click", async (e) => {
   const btn = e.target.closest("[data-act]");
   if (!btn) return;
   const id = btn.dataset.id;
+  if (btn.dataset.act === "edit-card") {
+    const c = state.cards.find((x) => x.id === id);
+    if (c) openCardEdit(c);
+    return;
+  }
   if (btn.dataset.act === "del-card") {
     if (!confirm("从卡库删除这张卡？")) return;
     try {

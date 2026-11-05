@@ -49,6 +49,20 @@ PROXY_PATH = os.path.join(DATA_DIR, "proxy.json")
 # 卡上可以直接 PATCH 的纯文本字段
 CARD_TEXT_FIELDS = ("label", "holder", "postal", "state", "city", "line1")
 
+
+def _clean_card_money(number, exp, cvc):
+    """校验并规范化卡号 / 有效期 / 安全码；不合法抛 ValueError（友好信息）。"""
+    num = re.sub(r"\D", "", number or "")
+    if len(num) < 12:
+        raise ValueError("卡号位数不对")
+    if not luhn_ok(num):
+        raise ValueError("卡号没通过 Luhn 校验，检查一下是否输错")
+    exp_s, mm, yy = normalize_exp(exp or "")      # 本身会在格式错误时抛 ValueError
+    cvc_d = re.sub(r"\D", "", cvc or "")
+    if len(cvc_d) not in (3, 4):
+        raise ValueError("安全码应为 3-4 位")
+    return num, exp_s, mm, yy, cvc_d
+
 _lock = threading.RLock()
 
 
@@ -391,15 +405,11 @@ class Handler(JSONHandler):
 
     def api_card_create(self):
         body = self._body()
-        number = re.sub(r"\D", "", body.get("number", ""))
-        if len(number) < 12:
-            return self._err("卡号位数不对")
-        if not luhn_ok(number):
-            return self._err("卡号没通过 Luhn 校验，检查一下是否输错")
-        exp, mm, yy = normalize_exp(body.get("exp", ""))
-        cvc = re.sub(r"\D", "", body.get("cvc", ""))
-        if len(cvc) not in (3, 4):
-            return self._err("安全码应为 3-4 位")
+        try:
+            number, exp, mm, yy, cvc = _clean_card_money(
+                body.get("number"), body.get("exp"), body.get("cvc"))
+        except ValueError as e:
+            return self._err(str(e))
 
         account_ids = body.get("accountIds")
         if not isinstance(account_ids, list):
@@ -470,6 +480,24 @@ class Handler(JSONHandler):
         for key in CARD_TEXT_FIELDS:
             if key in body:
                 card[key] = (body[key] or "").strip()
+        if body.get("country"):
+            card["country"] = body["country"].strip().upper()
+        # 可改卡号 / 有效期 / 安全码；卡号、安全码留空＝不改（有效期必填且已回显）
+        try:
+            if "exp" in body and str(body.get("exp") or "").strip():
+                card["exp"], card["expMonth"], card["expYear"] = normalize_exp(body["exp"])
+            if re.sub(r"\D", "", body.get("number") or ""):
+                num = re.sub(r"\D", "", body["number"])
+                if len(num) < 12 or not luhn_ok(num):
+                    raise ValueError("卡号无效，检查后重试")
+                card["number"] = num
+            if re.sub(r"\D", "", body.get("cvc") or ""):
+                cvc_d = re.sub(r"\D", "", body["cvc"])
+                if len(cvc_d) not in (3, 4):
+                    raise ValueError("安全码应为 3-4 位")
+                card["cvc"] = cvc_d
+        except ValueError as e:
+            return self._err(str(e))
         save_cards(store)
         return self._send(200, {"card": public_card(card, load_store()["accounts"])})
 
@@ -668,8 +696,9 @@ class Handler(JSONHandler):
                 card = find_by_id(load_cards()["cards"], body["cardId"])
                 if not card:
                     return self._err("卡库里没有这张卡", 404)
-                if card.get("accountId") and card["accountId"] != acc_id:
-                    return self._err("这张卡已绑定其它账号，先解绑再使用")
+                bound = card_account_ids(card)
+                if bound and acc_id not in bound:
+                    return self._err("这张卡绑定的是其它账号，先解绑或改绑再使用")
                 number, exp, cvc = card["number"], card["exp"], card["cvc"]
             else:
                 number, exp, cvc = (body.get("number", ""), body.get("exp", ""),

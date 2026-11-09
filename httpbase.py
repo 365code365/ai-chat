@@ -54,7 +54,7 @@ class JSONHandler(BaseHTTPRequestHandler):
         except Exception:
             return {}
 
-    def _static(self, web_dir, path, extra=None):
+    def _static(self, web_dir, path, extra=None, html_transform=None):
         """从 web_dir 发静态文件；拒绝跳出目录（含 web → web_customer 这种同前缀目录）。
 
         缓存策略：
@@ -75,6 +75,8 @@ class JSONHandler(BaseHTTPRequestHandler):
         body, etag = _cached_file(full)
         if full.endswith(".html"):
             body = _version_assets(root, body)
+            if html_transform is not None:
+                body = html_transform(body)       # 例：按登录态直接输出对应界面，避免闪屏
             etag = '"%s"' % hashlib.sha1(body).hexdigest()[:16]
         headers = dict(extra or {})
         headers["ETag"] = etag

@@ -24,6 +24,7 @@ import time
 import uuid
 
 import cgpt
+import proxyhub
 from browser import POOL
 from httpbase import JSONHandler, ThreadingHTTPServer
 from store import (
@@ -77,8 +78,10 @@ def _add_job(job):
 # 持久化到 data/jobs.json 供管理端「兑换记录」读取。只存非敏感字段（无卡号/CVC/token）。
 _PUBLIC_FIELDS = ("id", "code", "plan", "cardBrand", "cardLast4", "account",
                   "step", "stepLabel", "status", "message", "done", "ok",
-                  "failedStep", "failedStepLabel", "steps", "log", "shot",
+                  "failedStep", "failedStepLabel", "steps", "log", "shot", "proxy",
                   "createdAt", "updatedAt", "finishedAt", "durationMs")
+# 只给管理端看、不回给客户页的字段（代理渠道 / session / 出口 IP）
+_PRIVATE_FIELDS = ("proxy",)
 
 
 def _persist(job):
@@ -145,6 +148,31 @@ def _log(job, text):
     _persist(job)
 
 
+def _note_proxy(job, br):
+    """记下本单分到的代理（渠道 + session），后台线程探测出口 IP，不拖慢开通。"""
+    lease = br.lease
+    if not lease:
+        job["proxy"] = {"channel": "直连（中继未运行）"}
+        _persist(job)
+        return
+    proxyhub.tag_lease(br.slot, jobId=job["id"])
+    job["proxy"] = {"channel": lease.get("channelName") or "直连",
+                    "session": lease.get("session") or "", "slot": br.slot}
+    _persist(job)
+    if not lease.get("channelId"):
+        return
+
+    def run():
+        info = proxyhub.probe_slot(br.slot)
+        if info.get("ok"):
+            job["proxy"].update({k: info.get(k) for k in ("ip", "country", "city", "org")})
+        else:
+            job["proxy"]["error"] = info.get("error", "")
+        _persist(job)
+
+    threading.Thread(target=run, daemon=True).start()
+
+
 def run_subscribe(job, card, plan, session):
     """后台跑完整订阅链路，逐步更新进度。每笔占用池里一个独立浏览器。"""
     last_cdp = None
@@ -179,29 +207,21 @@ def run_subscribe(job, card, plan, session):
 
         _set_step(job, "login", "running", "正在登录 ChatGPT…")
         _log(job, "导入登录态：%s" % (account["email"] or "未知账号"))
-        # 登录直接落在定价页，下一步打开套餐弹窗时不用再整页加载一次
-        email = br.login(account, landing=cgpt.PRICING_URL)
+        # 登录直接落在该套餐的订阅弹窗，省掉首页 / 定价页两次整页加载
+        email = br.login(account, landing=cgpt.plan_dialog_url(plan))
+        _note_proxy(job, br)
         _log(job, "已登录：%s" % email)
 
         _set_step(job, "plan", "running", "正在打开%s订阅页…" % ("Plus" if plan == "plus" else "Pro"))
         cdp = br.attach()
         last_cdp = cdp
-        shot = os.path.join(SHOT_DIR, "customer-%s.png" % job["id"])
-        cgpt.open_plan_dialog(cdp, plan, shot)
-        job["shot"] = "/api/shots/customer-%s.png" % job["id"]
+        if not cgpt.open_buy_dialog(cdp, plan):
+            raise RuntimeError("订阅弹窗里没有可点击的购买按钮（可能已经是该套餐）")
 
         _set_step(job, "checkout", "running", "正在进入付款页…")
-        confirm = r"/立即支付|确认支付|继续前往|Continue/"
-        purchase = r"/立即购买|升级至|切换至|订阅|Buy|Upgrade/"
-        on_checkout = lambda: "/checkout/" in (cdp.js("location.href", await_promise=False) or "")
-        for _ in range(4):
-            hit = cgpt.click_in_dialog(cdp, confirm) or cgpt.click_in_dialog(cdp, purchase) or ""
-            if hit:
-                _log(job, "点击：%s" % hit)
-            # 最多等 1.5s，进入结账页立即继续（原先固定睡 1.5s）
-            if cgpt.wait_until(on_checkout, timeout=1.5):
-                break
-        tab = cgpt.find_checkout_tab(br.port, timeout=150)
+        tab, hit = cgpt.click_to_checkout(cdp, br.port, timeout=150)
+        if hit:
+            _log(job, "点击：%s" % hit)
         if not tab:
             raise RuntimeError("没能进入付款页（可能已经是当前套餐，或页面加载超时）")
         url = tab.get("url", "")
@@ -296,7 +316,8 @@ class Handler(JSONHandler):
             if not job:
                 return self._err("任务不存在", 404)
             # 浅拷贝后再序列化：任务线程可能正在往 job 里加字段
-            return self._send(200, dict(job))
+            return self._send(200, {k: v for k, v in dict(job).items()
+                                    if k not in _PRIVATE_FIELDS})
         return self.static_file(path)
 
     def do_POST(self):

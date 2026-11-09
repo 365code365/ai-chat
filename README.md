@@ -41,25 +41,31 @@ ADMIN_USER=admin ADMIN_PASSWORD=你的密码 python3 admin_server.py --port 8899
 - 客户页只按兑换码取卡，不暴露账号
 - 兑换成功后标记「已兑换」，状态留在卡库里
 
-## 代理（拿地区价）
+## 代理 IP（动态住宅，每单一个新 IP）
 
-后台侧边栏「代理」可填上游代理，登录/订阅/结账所有流量都会走它：
+后台侧边栏「代理」管理多个**渠道**，选一个为**默认渠道**（也可选「直连」）：
 
 ```
-浏览器 → 127.0.0.1:8898（本地中继）→ 你填的上游（http / https / socks5）→ 目标
+Chrome → 127.0.0.1:<槽位端口>（本地中继）→ 默认渠道（kookeey 网关 / 自定义上游）→ 目标
+         管理端浏览器 8898；客户池 c0 / c1 … 用 8960 / 8961 …
 ```
 
-- Chrome 只在启动时读 `--proxy-server`，所以**第一次启用要点「重启浏览器并应用」**；之后改上游只改配置，中继按连接实时读取，不用再重启
-- 支持三种写法：
-  - `host:port:user:pass`（Kookeey 等代理商格式，默认按 HTTP 代理）
-  - `http://user:pass@host:port` / `https://...`
-  - `socks5://user:pass@host:port`
-- 留空 = 直连
-- 「检测出口 IP」会让中继去请求 ipify，显示真正的出口 IP 和延迟
-- `127.0.0.1` 走 `--proxy-bypass-list=<-loopback>` 直连，不会被代理
+- **每次启动浏览器签一份租约**：默认渠道 + 新的 8 位 session ⇒ 一个新的动态住宅 IP。
+  客户每笔开通都会新开浏览器，所以**每单一个新 IP，单内 IP 不变**（结账需要 IP 一致）。任务结束杀浏览器时释放租约。
+- 渠道类型
+  - **kookeey 动态住宅**（提取模式 · 账密）：用户 ID、提取账号/密码、地区（`US` / `JP` / `US_California` / `global`）、网关。
+    连接串按官方格式拼：`用户ID-账号:密码-地区-session@gate.kookeey.info:1000`。
+    填了**开发者 token** 后可调 `chgsessionip` 接口换 IP、查动态套餐余量（`/package`）、一键拉取提取账密（`/resauth`）。
+  - **自定义上游**：`http(s)://` / `socks5://` / `host:port:user:pass`；`{session}` 占位符会替换成随机 session；可选「换 IP 链接」（GET）。
+- 换 IP 方式：「每个任务一个 IP」（默认）或「每个连接都换 IP」（同一结账会出现多个 IP，只建议测试用）。
+- **切换 IP**：kookeey 有 token 时调接口给当前 session 换出口，失败或没 token 就换新 session；
+  中继随后断开该浏览器的旧连接，浏览器重连即走新 IP，不用重启。改了默认渠道后点「切换 IP」也会立即切过去。
+- 「在用的出口」列出每个浏览器当前的渠道 / session / 出口 IP；兑换记录里也记下每单的出口（只给后台看，不回给客户页）。
+- 密码、token、上游地址加密落盘（`data/proxy.json`），租约在 `data/proxy_leases/`。旧版 `{"upstream": ...}` 自动变成「旧配置」渠道。
+- `127.0.0.1` 走 `--proxy-bypass-list` 直连，不会被代理。
 
 ```bash
-python3 proxy_relay.py --port 8898      # 手动起中继（start.sh 会自动起）
+python3 proxy_relay.py --port 8898      # 手动起中继（start.sh 会自动起）；升级后需重启中继
 ```
 
 > 币种由 IP 区域 + 账号账单地区共同决定；换 IP 后要重新打开订阅页才会刷新价格。
@@ -94,7 +100,10 @@ cgpt/                  # 自动化核心（原 cgpt.py 拆分）
   plans.py             定价页、套餐弹窗、结账页跳转
   cards.py             Stripe 卡信息与账单地址填写
 store.py               账号 / 卡库 / 兑换码 持久化（含原子写 JSON 工具）
-browser.py             共享 Chrome 单例
+browser.py             共享 Chrome 单例 / 浏览器池（每个实例一个代理槽位）
+proxyhub/              代理 IP 模块：渠道、默认渠道、租约、kookeey API、出口探测
+proxy_relay.py         本地代理中继（按槽位端口选上游，换 IP 时断开旧连接）
+admin_proxy.py         后台「代理」接口
 httpbase.py            两个服务共用的 HTTP 基类（JSON 响应、请求体、静态文件）
 admin_server.py        后台 API + 静态服务（629 行）
 customer_server.py     客户页 API + 订阅任务队列（311 行）

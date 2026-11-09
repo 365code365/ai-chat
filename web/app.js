@@ -298,10 +298,10 @@ function accountCard(a) {
         </button>
       </div>
       <div class="acc-row-2">
-        <button class="btn plus" data-act="plan" data-plan="plus" ${a.hasSession ? "" : "disabled"}>
+        <button class="btn plus" data-act="plan" data-plan="plus" title="一键进入 Plus 付款页" ${a.hasSession ? "" : "disabled"}>
           Plus${plus ? `<span class="price">${esc(plus)}</span>` : ""}
         </button>
-        <button class="btn pro" data-act="plan" data-plan="pro" ${a.hasSession ? "" : "disabled"}>
+        <button class="btn pro" data-act="plan" data-plan="pro" title="一键进入 Pro 付款页" ${a.hasSession ? "" : "disabled"}>
           Pro${pro ? `<span class="price">${esc(pro)}</span>` : ""}
         </button>
       </div>
@@ -437,6 +437,10 @@ function jobRow(j) {
   const failLine = (j.done && !j.ok)
     ? `<div class="jl-error"><b>卡在「${esc(j.failedStepLabel || j.stepLabel || "—")}」</b>${esc(j.message || "")}</div>`
     : "";
+  const px = j.proxy;
+  const proxyLine = px
+    ? `<div class="jl-proxy">出口：${esc(px.channel || "直连")}${px.session ? " · session " + esc(px.session) : ""}${px.ip ? " · " + esc([px.ip, px.country, px.city, px.org].filter(Boolean).join(" ")) : (px.error ? " · 检测失败 " + esc(px.error) : "")}</div>`
+    : "";
   const shot = j.shot
     ? `<a class="jl-shot" href="${esc(j.shot)}" target="_blank" rel="noopener"><img src="${esc(j.shot)}" alt="页面截图" loading="lazy" /></a>`
     : "";
@@ -454,6 +458,7 @@ function jobRow(j) {
       <div class="jl-main">
         <ul class="jl-timeline">${stepTimeline}</ul>
         ${failLine}
+        ${proxyLine}
         <div class="jl-logs">${logs || '<div class="muted small">无日志</div>'}</div>
       </div>
       ${shot ? `<div class="jl-side">${shot}<span class="muted tiny">当时的页面</span></div>` : ""}
@@ -1024,95 +1029,83 @@ function vaultOptions(accountId) {
   ).join("");
 }
 
+/* 一键进结账页：点 Plus / Pro 直接打开付款页（失败可在抽屉里重试） */
 async function openPlan(a, plan, btn) {
   state.acc = a;
   state.plan = plan;
   state.cardId = null;
+  const name = plan === "plus" ? "Plus" : "Pro";
 
   openDrawer();
-  steps(1);
   $("#drawerKicker").textContent = plan.toUpperCase();
-  $("#drawerTitle").textContent = plan === "plus" ? "Plus 订阅" : "Pro 订阅";
-  $("#drawerSub").textContent = `${a.email} · 正在打开订阅页`;
+  $("#drawerTitle").textContent = `${name} 订阅`;
   $("#priceRow").innerHTML = "";
   $("#drawerShot").removeAttribute("src");
+  $("#vaultCard").innerHTML = vaultOptions(a.id);
+  fillCountrySelect($("#addrCountry"), $("#addrCountry").value || "JP");
+  await goCheckout(btn);
+}
+
+async function goCheckout(btn) {
+  const { acc, plan } = state;
+  if (!acc) return;
+  const name = plan === "plus" ? "Plus" : "Pro";
+  steps(1);
+  $("#drawerSub").textContent = `${acc.email} · 正在进入 ${name} 付款页`;
   $("#shotLoading").classList.remove("hidden");
-  $("#shotLoading").textContent = "正在打开订阅弹窗…";
+  $("#shotLoading").textContent = `正在进入 ${name} 付款页…`;
   $("#checkoutBox").classList.add("hidden");
-  $("#stagePlan").classList.remove("hidden");
+  $("#stagePlan").classList.add("hidden");
   $("#coAmount").textContent = "—";
   $("#coState").className = "pill-state";
   $("#coState").textContent = "等待填写";
   $("#submitBtn").disabled = true;
-  $("#vaultCard").innerHTML = vaultOptions(a.id);
-  fillCountrySelect($("#addrCountry"), $("#addrCountry").value || "JP");
 
-  busy(btn, true);
-  try {
-    const d = await api(`/api/accounts/${encodeURIComponent(a.id)}/plan`, {
-      method: "POST",
-      body: JSON.stringify({ plan }),
-    });
-    const tags = [];
-    if (d.price) tags.push(`<span class="price-tag">参考价 <b>${esc(d.price)}</b>/月</span>`);
-    if (d.cta) tags.push(`<span class="price-tag">按钮 <b>${esc(d.cta)}</b></span>`);
-    tags.push(`<span class="price-tag">已选中 <b>${plan === "plus" ? "Plus" : "Pro"}</b></span>`);
-    $("#priceRow").innerHTML = tags.join("");
-
-    const img = new Image();
-    img.onload = () => $("#shotLoading").classList.add("hidden");
-    img.src = d.screenshotUrl;
-    $("#drawerShot").src = d.screenshotUrl;
-    $("#drawerSub").textContent = `${d.email || a.email} · 订阅弹窗已打开`;
-    toast(`${plan === "plus" ? "Plus" : "Pro"} 已选中`, "ok");
-    await loadAll();
-  } catch (e) {
-    $("#shotLoading").textContent = e.message;
-    toast(e.message, "bad");
-  } finally {
-    busy(btn, false);
-  }
-}
-
-$("#goCheckoutBtn").addEventListener("click", async () => {
-  const { acc, plan } = state;
-  if (!acc) return;
-  const btn = $("#goCheckoutBtn");
-  busy(btn, true);
-  $("#shotLoading").classList.remove("hidden");
-  $("#shotLoading").textContent = "正在进入付款页…";
+  const btns = [btn, $("#goCheckoutBtn")].filter(Boolean);
+  btns.forEach((b) => busy(b, true));
   try {
     const d = await api(`/api/accounts/${encodeURIComponent(acc.id)}/checkout`, {
       method: "POST",
       body: JSON.stringify({ plan }),
     });
-    if (d.screenshotUrl) $("#drawerShot").src = d.screenshotUrl;
-    $("#shotLoading").classList.add("hidden");
+    if (d.screenshotUrl) {
+      const img = new Image();
+      img.onload = () => $("#shotLoading").classList.add("hidden");
+      img.src = d.screenshotUrl;
+      $("#drawerShot").src = d.screenshotUrl;
+    }
+    const secs = d.elapsedMs ? ` · 用时 ${(d.elapsedMs / 1000).toFixed(1)}s` : "";
 
     if (!d.ok || !d.url) {
-      $("#coState").className = "pill-state bad";
-      $("#coState").textContent = "没进入付款页";
-      $("#coAmount").textContent = "—";
-      toast("没进入付款页：可能已经是当前套餐，或按钮不是购买按钮", "bad");
+      $("#shotLoading").textContent = d.error || "没进入付款页";
+      $("#stagePlan").classList.remove("hidden");
+      $("#goCheckoutBtn").textContent = "重试 · 进入付款页";
+      $("#drawerSub").textContent = `${d.email || acc.email} · 没进入付款页${secs}`;
+      toast(d.error || "没进入付款页：可能已经是当前套餐", "bad");
       return;
     }
 
     $("#coAmount").textContent = d.amount || "—";
-    $("#stagePlan").classList.add("hidden");
+    $("#priceRow").innerHTML = `<span class="price-tag">已选 <b>${name}</b></span>`
+      + (d.amount ? `<span class="price-tag">今日应付 <b>${esc(d.amount)}</b></span>` : "");
     $("#checkoutBox").classList.remove("hidden");
     steps(2);
     $("#coState").className = "pill-state " + (d.ready ? "ok" : "");
     $("#coState").textContent = d.ready ? "卡信息字段就绪" : "页面仍在加载";
-    $("#drawerSub").textContent = `${d.email || acc.email} · 已进入付款页`;
-    toast(d.ready ? "付款页就绪" : "付款页还在加载", d.ready ? "ok" : "bad");
+    $("#drawerSub").textContent = `${d.email || acc.email} · 已进入 ${name} 付款页${secs}`;
+    toast(d.ready ? `${name} 付款页就绪` : "付款页还在加载", d.ready ? "ok" : "bad");
     await loadAll();
   } catch (e) {
     $("#shotLoading").textContent = e.message;
+    $("#stagePlan").classList.remove("hidden");
+    $("#goCheckoutBtn").textContent = "重试 · 进入付款页";
     toast(e.message, "bad");
   } finally {
-    busy(btn, false);
+    btns.forEach((b) => busy(b, false));
   }
-});
+}
+
+$("#goCheckoutBtn").addEventListener("click", () => goCheckout($("#goCheckoutBtn")));
 
 $("#vaultCard").addEventListener("change", (e) => {
   const opt = e.target.selectedOptions[0];
@@ -1259,16 +1252,93 @@ $("#cardCvc").addEventListener("input", (e) => {
 
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
-    if (!$("#cardModal").classList.contains("hidden")) closeCardModal();
+    if (!$("#channelModal").classList.contains("hidden")) closeChannelModal();
+    else if (!$("#cardModal").classList.contains("hidden")) closeCardModal();
     else closeDrawer();
   }
 });
 
-/* ------------------------------- 代理 ------------------------------- */
+/* ------------------------------- 代理 IP ------------------------------- */
+const proxyState = { data: null, editId: null, results: {} };
+
+const ROTATION_LABEL = { task: "每任务一个 IP", connection: "每连接换 IP" };
+
+function exitText(x) {
+  if (!x) return "出口未检测";
+  if (!x.ok) return "检测失败：" + (x.error || "");
+  return [x.ip, [x.country, x.city].filter(Boolean).join(" "), x.org, x.ms != null ? x.ms + "ms" : ""]
+    .filter(Boolean).join(" · ");
+}
+
+function channelRow(c) {
+  const res = proxyState.results[c.id];
+  const resHtml = res
+    ? `<span class="ch-result ${res.ok ? "ok" : "bad"}">${esc(res.text)}</span>` : "";
+  return `
+  <div class="ch-row ${c.isDefault ? "is-default" : ""}" data-id="${esc(c.id)}">
+    <input type="radio" name="defaultChannel" value="${esc(c.id)}" ${c.isDefault ? "checked" : ""} title="设为默认渠道" />
+    <div class="ch-main">
+      <div class="ch-name">${esc(c.name)}
+        <span class="badge">${c.type === "kookeey" ? "kookeey" : "自定义"}</span>
+        <span class="badge">${ROTATION_LABEL[c.rotation] || c.rotation}</span>
+        ${c.isDefault ? '<span class="badge pro">默认</span>' : ""}
+      </div>
+      <div class="ch-sub" title="${esc(c.summary)}">${esc(c.summary)}${c.type === "kookeey" && !c.hasToken ? " · 未填 token（换 IP 用新 session）" : ""}</div>
+      ${resHtml}
+    </div>
+    <div class="ch-actions">
+      <button class="mini" data-ch="test">测试</button>
+      ${c.type === "kookeey" ? '<button class="mini" data-ch="traffic">流量</button>' : ""}
+      <button class="mini" data-ch="edit">编辑</button>
+      <button class="mini" data-ch="delete">删除</button>
+    </div>
+  </div>`;
+}
+
+function leaseRow(l) {
+  const when = l.rotatedAt || l.startedAt;
+  return `
+  <div class="ch-row" data-slot="${esc(l.slot)}">
+    <div class="ch-main">
+      <div class="ch-name">${esc(l.label)}
+        <span class="status ${l.running ? "ok" : ""}">${l.running ? "运行中" : "未运行"}</span>
+      </div>
+      <div class="ch-sub">${esc(l.channelName)}${l.session ? " · session " + esc(l.session) : ""}${l.jobId ? " · 任务 " + esc(l.jobId) : ""}${when ? " · " + jobTime(when) : ""}</div>
+      <span class="ch-result ${l.exit ? (l.exit.ok ? "ok" : "bad") : ""}">${esc(exitText(l.exit))}</span>
+    </div>
+    <div class="ch-actions">
+      <button class="mini" data-lease="test">检测</button>
+      <button class="mini" data-lease="rotate">切换 IP</button>
+    </div>
+  </div>`;
+}
+
 function renderProxy(d) {
-  $("#proxyInput").value = d.upstream || "";
-  $("#relayState").textContent = d.relayAlive ? "中继运行中 · " + d.relayPort : "中继未运行";
-  $("#relayState").className = "pill-state " + (d.relayAlive ? "ok" : "bad");
+  proxyState.data = d;
+  const r = d.relay || {};
+  $("#relayState").textContent = r.alive
+    ? (r.slotsAlive ? `中继运行中 · ${r.port}` : "中继是旧版，请重启 proxy_relay.py")
+    : "中继未运行（浏览器直连）";
+  $("#relayState").className = "pill-state " + (r.alive && r.slotsAlive ? "ok" : "bad");
+
+  const direct = `
+  <div class="ch-row ${d.defaultId ? "" : "is-default"}">
+    <input type="radio" name="defaultChannel" value="" ${d.defaultId ? "" : "checked"} title="不走代理" />
+    <div class="ch-main"><div class="ch-name">直连 ${d.defaultId ? "" : '<span class="badge pro">默认</span>'}</div>
+      <div class="ch-sub">不走代理，用服务器本机 IP</div></div>
+  </div>`;
+  $("#channelList").innerHTML = (d.channels || []).map(channelRow).join("") + direct;
+
+  const leases = d.leases || [];
+  $("#leaseList").innerHTML = leases.length
+    ? leases.map(leaseRow).join("")
+    : '<div class="ch-empty">暂无。浏览器启动时会按默认渠道分配出口。</div>';
+
+  const main = leases.find((l) => l.slot === "main");
+  $("#mainLease").textContent = main
+    ? `${main.channelName}${main.session ? " · session " + main.session : ""}`
+    : "浏览器未启动";
+  if (main && main.exit) $("#proxyExit").textContent = exitText(main.exit);
 }
 
 async function loadProxy() {
@@ -1280,31 +1350,94 @@ async function loadProxy() {
   }
 }
 
-async function saveProxy(value) {
+async function proxyPost(path, body) {
+  return api(path, { method: "POST", body: JSON.stringify(body || {}) });
+}
+
+/* ---- 默认渠道 ---- */
+$("#channelList").addEventListener("change", async (e) => {
+  if (e.target.name !== "defaultChannel") return;
   try {
-    const d = await api("/api/proxy", { method: "POST", body: JSON.stringify({ upstream: value }) });
-    $("#proxyInput").value = d.upstream || "";
-    $("#proxyHint").textContent = d.upstream ? "已保存，点右侧「重启浏览器并应用」生效" : "已切回直连";
-    $("#proxyHint").className = "hint ok";
-    toast(d.upstream ? "代理已保存" : "已切回直连", "ok");
+    renderProxy(await proxyPost("/api/proxy/default", { id: e.target.value }));
+    toast("默认渠道已切换；新开的浏览器 / 下一笔开通生效，管理端点「切换 IP」立即生效", "ok");
+  } catch (err) {
+    toast(err.message, "bad");
+    loadProxy();
+  }
+});
+
+/* ---- 渠道操作 ---- */
+$("#channelList").addEventListener("click", async (e) => {
+  const btn = e.target.closest("[data-ch]");
+  if (!btn) return;
+  const id = btn.closest(".ch-row").dataset.id;
+  const ch = (proxyState.data?.channels || []).find((c) => c.id === id);
+  if (!ch) return;
+  const act = btn.dataset.ch;
+  if (act === "edit") return openChannelModal(ch);
+  if (act === "delete") {
+    if (!confirm(`删除渠道「${ch.name}」？`)) return;
+    try {
+      renderProxy(await api(`/api/proxy/channels/${encodeURIComponent(id)}`, { method: "DELETE" }));
+      toast("已删除", "ok");
+    } catch (err) { toast(err.message, "bad"); }
+    return;
+  }
+  busy(btn, true);
+  try {
+    const d = await proxyPost(`/api/proxy/channels/${encodeURIComponent(id)}/${act}`);
+    if (act === "test") {
+      proxyState.results[id] = { ok: d.ok, text: (d.session ? `session ${d.session} → ` : "") + exitText(d) };
+    } else {
+      proxyState.results[id] = d.ok
+        ? { ok: true, text: `剩余 ${d.leftGb ?? "?"} GB / 共 ${d.totalGb ?? "?"} GB${d.package ? " · " + d.package : ""}${d.expireAt ? " · 到期 " + new Date(d.expireAt * 1000).toLocaleDateString() : ""}` }
+        : { ok: false, text: d.error || "查询失败" };
+    }
+    renderProxy(proxyState.data);
+  } catch (err) {
+    toast(err.message, "bad");
+  } finally {
+    busy(btn, false);
+  }
+});
+
+/* ---- 在用出口：检测 / 切换 ---- */
+async function slotAction(slot, act, btn) {
+  busy(btn, true);
+  try {
+    if (act === "rotate") {
+      const d = await proxyPost("/api/proxy/rotate", { slot });
+      toast(`${d.note}${d.exit?.ok ? " → " + d.exit.ip : ""}`, d.exit?.ok === false ? "bad" : "ok");
+    } else {
+      const d = await proxyPost("/api/proxy/test", { slot });
+      if (!d.ok) toast("检测失败：" + (d.error || ""), "bad");
+      if (slot === "main") $("#proxyExit").textContent = exitText(d);
+    }
     await loadProxy();
-  } catch (e) {
-    $("#proxyHint").textContent = e.message;
-    $("#proxyHint").className = "hint bad";
-    toast(e.message, "bad");
+  } catch (err) {
+    toast(err.message, "bad");
+  } finally {
+    busy(btn, false);
   }
 }
 
-$("#proxySaveBtn")?.addEventListener("click", () => saveProxy($("#proxyInput").value.trim()));
-$("#proxyClearBtn")?.addEventListener("click", () => saveProxy(""));
+$("#leaseList").addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-lease]");
+  if (btn) slotAction(btn.closest(".ch-row").dataset.slot, btn.dataset.lease, btn);
+});
+$("#testIpBtn").addEventListener("click", (e) => {
+  $("#proxyExit").textContent = "检测中…";
+  slotAction("main", "test", e.currentTarget);
+});
+$("#rotateIpBtn").addEventListener("click", (e) => slotAction("main", "rotate", e.currentTarget));
 
-$("#proxyRestartBtn")?.addEventListener("click", async () => {
+$("#proxyRestartBtn").addEventListener("click", async () => {
   const btn = $("#proxyRestartBtn");
   busy(btn, true);
   try {
-    await api("/api/proxy/restart", { method: "POST" });
-    toast("浏览器已重启，代理生效", "ok");
-    await loadProxy();
+    const d = await proxyPost("/api/proxy/restart");
+    toast("浏览器已重启，已分配新的出口", "ok");
+    if (d.proxy) renderProxy(d.proxy);
     await refreshStatus();
   } catch (e) {
     toast(e.message, "bad");
@@ -1313,16 +1446,105 @@ $("#proxyRestartBtn")?.addEventListener("click", async () => {
   }
 });
 
-$("#testIpBtn")?.addEventListener("click", async () => {
-  const btn = $("#testIpBtn");
+/* ---- 渠道弹窗 ---- */
+function chType() { return $("#chType").value; }
+
+function syncChannelType() {
+  $("#chKkFields").classList.toggle("hidden", chType() !== "kookeey");
+  $("#chCustomFields").classList.toggle("hidden", chType() !== "custom");
+}
+
+function openChannelModal(ch) {
+  const c = ch || {};
+  proxyState.editId = ch ? ch.id : null;
+  $("#channelModalTitle").textContent = ch ? `编辑渠道 · ${c.name}` : "添加渠道";
+  $("#chType").value = c.type || "kookeey";
+  $("#chType").disabled = !!ch;
+  $("#chName").value = c.name || "";
+  $("#chRotation").value = c.rotation || "task";
+  $("#chUid").value = c.uid || "";
+  $("#chAccessid").value = c.accessid || "";
+  $("#chToken").value = "";
+  $("#chToken").placeholder = c.hasToken ? "已保存（留空不改）" : "账户中心 → 开发者 token";
+  $("#chAuthName").value = c.authName || "";
+  $("#chAuthPwd").value = "";
+  $("#chAuthPwd").placeholder = c.hasAuthPwd ? "已保存（留空不改）" : "安全策略密码";
+  $("#chGeo").value = c.geo || "US";
+  $("#chProtocol").value = c.protocol || "http";
+  $("#chGateway").innerHTML = (proxyState.data?.gateways || [])
+    .map((g) => `<option value="${esc(g.host)}">${esc(g.host)} · ${esc(g.label)}</option>`).join("");
+  $("#chGateway").value = c.gateway || "gate.kookeey.info";
+  $("#chPort").value = c.port || 1000;
+  $("#chUpstream").value = "";
+  $("#chUpstream").placeholder = c.upstreamMasked
+    ? `已保存：${c.upstreamMasked}（留空不改）` : "http://user-{session}:pass@host:port   或   host:port:user:pass";
+  $("#chChangeUrl").value = "";
+  $("#chChangeUrl").placeholder = c.hasChangeIpUrl ? "已保存（留空 = 清除）" : "https://provider.example/api/change?key=…";
+  $("#chDefault").checked = ch ? !!c.isDefault : !(proxyState.data?.channels || []).length;
+  $("#chAuthHint").textContent = "填好用户 ID 和开发者 token 后可自动获取提取模式账密";
+  $("#chAuthHint").className = "hint";
+  syncChannelType();
+  $("#channelModal").classList.remove("hidden");
+}
+
+function closeChannelModal() {
+  $("#channelModal").classList.add("hidden");
+}
+
+$("#addChannelBtn").addEventListener("click", () => openChannelModal(null));
+$("#channelModalClose").addEventListener("click", closeChannelModal);
+$("#channelCancel").addEventListener("click", closeChannelModal);
+$("#channelModal").addEventListener("click", (e) => { if (e.target.id === "channelModal") closeChannelModal(); });
+$("#chType").addEventListener("change", syncChannelType);
+
+$("#chFetchAuth").addEventListener("click", async () => {
+  const btn = $("#chFetchAuth");
   busy(btn, true);
-  $("#proxyExit").textContent = "检测中…";
   try {
-    const d = await api("/api/proxy/test", { method: "POST" });
-    if (!d.ok) throw new Error(d.error || "检测失败");
-    $("#proxyExit").textContent = `${d.ip}${d.country ? " · " + d.country : ""} · ${d.ms}ms`;
+    const d = await proxyPost("/api/proxy/kookeey/auth", {
+      uid: $("#chUid").value.trim(), accessid: $("#chAccessid").value.trim(),
+      token: $("#chToken").value.trim(), channelId: proxyState.editId,
+    });
+    if (!d.ok) throw new Error(d.error || "拉取失败");
+    $("#chAuthName").value = d.authName;
+    $("#chAuthPwd").value = d.authPwd;
+    $("#chAuthHint").textContent = `已获取：${d.authName}`;
+    $("#chAuthHint").className = "hint ok";
   } catch (e) {
-    $("#proxyExit").textContent = "检测失败：" + e.message;
+    $("#chAuthHint").textContent = e.message;
+    $("#chAuthHint").className = "hint bad";
+  } finally {
+    busy(btn, false);
+  }
+});
+
+$("#channelSave").addEventListener("click", async () => {
+  const btn = $("#channelSave");
+  const body = {
+    type: chType(), name: $("#chName").value.trim(), rotation: $("#chRotation").value,
+    makeDefault: $("#chDefault").checked,
+  };
+  if (body.type === "kookeey") {
+    Object.assign(body, {
+      uid: $("#chUid").value.trim(), accessid: $("#chAccessid").value.trim(),
+      token: $("#chToken").value.trim(), authName: $("#chAuthName").value.trim(),
+      authPwd: $("#chAuthPwd").value.trim(), geo: $("#chGeo").value.trim(),
+      protocol: $("#chProtocol").value, gateway: $("#chGateway").value, port: $("#chPort").value.trim(),
+    });
+  } else {
+    Object.assign(body, { upstream: $("#chUpstream").value.trim(), changeIpUrl: $("#chChangeUrl").value.trim() });
+  }
+  busy(btn, true);
+  try {
+    const id = proxyState.editId;
+    const d = id
+      ? await api(`/api/proxy/channels/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(body) })
+      : await proxyPost("/api/proxy/channels", body);
+    renderProxy(d);
+    closeChannelModal();
+    toast("渠道已保存", "ok");
+  } catch (e) {
+    toast(e.message, "bad");
   } finally {
     busy(btn, false);
   }

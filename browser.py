@@ -11,12 +11,13 @@ import threading
 import time
 
 import cgpt
+import proxyhub
 from store import SHOT_DIR
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 BROWSER_PORT = 9333
 BROWSER_PROFILE = os.path.join(HERE, ".chrome-gpt-profile")
-RELAY_PORT = 8898
+RELAY_PORT = proxyhub.RELAY_PORT
 
 # 客户开通的并发浏览器数（每个约 300–500MB 内存）。默认 2，可用环境变量调。
 POOL_SIZE = max(1, int(os.environ.get("TD_BROWSER_POOL", "2")))
@@ -42,6 +43,9 @@ class Browser(object):
         self.tab_id = None
         self.started_at = None
         self.proc = None
+        self.slot = name                         # 代理槽位：中继上独立端口 + 独立租约
+        self.relay_port = proxyhub.slot_port(name)
+        self.lease = None
 
     # ---- 基础 ----
     def running(self):
@@ -53,9 +57,16 @@ class Browser(object):
             return
         self.close()
         extra = []
-        if relay_alive():
-            extra = ["--proxy-server=http://127.0.0.1:%d" % RELAY_PORT,
+        port = self.relay_port if relay_alive(self.relay_port) else None
+        if port is None and relay_alive(RELAY_PORT):
+            port = RELAY_PORT                    # 旧版中继没有分槽位端口：退回共用端口
+        if port is not None:
+            # 每次启动签一份新租约：默认渠道 + 新 session ⇒ 一个新的动态住宅 IP
+            self.lease = proxyhub.new_lease(self.slot, cdp_port=self.port)
+            extra = ["--proxy-server=http://127.0.0.1:%d" % port,
                      "--proxy-bypass-list=127.0.0.1;localhost;::1"]
+        else:
+            self.lease = None
         self.proc = cgpt.launch_browser(
             self.port, self.profile, headless=cgpt.HEADLESS,
             log_path=os.path.join(HERE, "chrome-%s.log" % self.name), extra_args=extra,
@@ -112,6 +123,8 @@ class Browser(object):
                 pass
             self.proc = None
         cgpt.wait_until(lambda: not self.running(), timeout=3, interval=0.15)
+        proxyhub.release(self.slot)
+        self.lease = None
 
     def restart(self):
         self.kill()
@@ -130,6 +143,13 @@ class Browser(object):
         self.ensure()
         cdp = self.attach(blank_ok=True)
         email = cgpt.login_account(cdp, acc, url=landing or "https://chatgpt.com/")
+        if not email and self.lease and self.lease.get("channelId"):
+            # 个别住宅 IP 会被 Cloudflare 拦（页面停在挑战页）：换一个 IP 重试一次
+            try:
+                self.lease = proxyhub.rotate(self.slot)[0]
+                email = cgpt.login_account(cdp, acc, url=landing or "https://chatgpt.com/")
+            except Exception:
+                email = ""
         if not email:
             raise RuntimeError("登录失败：会话可能已失效，请重新导出 token")
         if acc.get("email") and email.lower() != acc["email"].lower():
@@ -138,51 +158,53 @@ class Browser(object):
         self.current_email = email
         return email
 
-    def ensure_login(self, acc):
+    def ensure_login(self, acc, landing=None):
+        """确保浏览器登录的是 acc；需要重新登录时直接落在 landing 页。"""
         self.ensure()
         if self.current_id == acc["id"] and self.current_email:
             cdp = self.attach()
             if cgpt.current_session_email(cdp):
                 return cdp
-        cdp = self.attach()
+        cdp = self.attach(blank_ok=bool(landing))
         if self.current_id != acc["id"] or not cgpt.current_session_email(cdp):
-            self.login(acc)
+            self.login(acc, landing=landing)
             cdp = self.attach()
         return cdp
 
     def start_checkout(self, acc, plan):
-        """打开订阅弹窗 → 点购买 → 停在 Stripe 结账页。"""
-        cdp = self.ensure_login(acc)
-        cgpt.open_plan_dialog(cdp, plan, os.path.join(SHOT_DIR, "%s-%s.png" % (acc["id"], plan)))
-        pattern = r"/立即购买|升级至|切换至|立即支付|确认支付|继续|订阅|Buy|Upgrade/"
-        clicked = ""
-        on_checkout = lambda: "/checkout/" in (cdp.js("location.href", await_promise=False) or "")
-        for _ in range(3):
-            hit = cgpt.click_in_dialog(cdp, pattern) or ""
-            if hit:
-                clicked = clicked or hit
-            # 最多等 1.5s，跳到结账页就立刻继续
-            if cgpt.wait_until(on_checkout, timeout=1.5):
-                break
-        url = cgpt.wait_checkout(cdp, timeout=60)
-        ready = cgpt.wait_card_ready(self.port, timeout=60) if url else False
-        amount = ""
-        deadline = time.time() + 20
-        while time.time() < deadline and not amount:
-            amount = cgpt.checkout_amount(cdp)
-            if not amount:
-                time.sleep(0.4)
-        shot = cgpt.capture(cdp, os.path.join(SHOT_DIR, "%s-checkout.png" % acc["id"]))
-        return {
-            "ok": bool(url),
-            "url": url,
-            "clicked": clicked,
-            "ready": ready,
-            "amount": amount,
-            "screenshotUrl": "/api/shots/%s-checkout.png?t=%d" % (acc["id"], int(time.time())),
-            "screenshot": shot,
-            "email": self.current_email,
+        """一键进结账页：（需要时登录并直接落在套餐弹窗）→ 点升级 → 停在 Stripe 付款页。"""
+        t0 = time.time()
+        cdp = self.ensure_login(acc, landing=cgpt.plan_dialog_url(plan))
+        tab, clicked, err = cgpt.goto_checkout(cdp, self.port, plan)
+        shot_name = "%s-checkout.png" % acc["id"]
+        shot_path = os.path.join(SHOT_DIR, shot_name)
+        res = {
+            "ok": False, "url": "", "clicked": clicked, "ready": False, "amount": "",
+            "error": err, "email": self.current_email,
+            "screenshotUrl": "/api/shots/%s?t=%d" % (shot_name, int(time.time())),
         }
+        if not tab:
+            res["screenshot"] = cgpt.capture(cdp, shot_path)
+            res["elapsedMs"] = int((time.time() - t0) * 1000)
+            return res
+        # 结账页可能在原标签，也可能是新标签：直接连到它
+        co = cgpt.CDP(tab["webSocketDebuggerUrl"])
+        try:
+            co.call("Page.enable")
+            res["url"] = tab.get("url", "")
+            res["ok"] = True
+            res["ready"] = cgpt.wait_card_ready(self.port, timeout=60)
+            deadline = time.time() + 15
+            while time.time() < deadline and not res["amount"]:
+                res["amount"] = cgpt.checkout_amount(co)
+                if not res["amount"]:
+                    time.sleep(0.4)
+            res["screenshot"] = cgpt.capture(co, shot_path)
+        finally:
+            co.close()
+        self.cdp = None            # 下次 attach 重新绑定到当前（结账）标签
+        res["elapsedMs"] = int((time.time() - t0) * 1000)
+        return res
 
     def ensure_same_account(self, acc):
         """校验浏览器里当前登录的就是这个账号（重启后 current_id 可能为空）。"""

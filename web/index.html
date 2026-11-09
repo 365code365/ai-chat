@@ -113,7 +113,7 @@
 
       <div class="grid" id="accountGrid"></div>
 
-      <div class="empty" id="accountEmpty">
+      <div class="empty hidden" id="accountEmpty">
         <div class="empty-art">
           <svg viewBox="0 0 64 64" width="54" height="54" fill="none" stroke="currentColor" stroke-width="1.4">
             <rect x="9" y="14" width="46" height="36" rx="6"/><circle cx="32" cy="29" r="6"/>
@@ -139,7 +139,7 @@
 
       <div class="card-list" id="cardList"></div>
 
-      <div class="empty" id="cardEmpty">
+      <div class="empty hidden" id="cardEmpty">
         <div class="empty-art">
           <svg viewBox="0 0 64 64" width="54" height="54" fill="none" stroke="currentColor" stroke-width="1.4">
             <rect x="8" y="18" width="48" height="30" rx="5"/><path d="M8 27h48"/><path d="M17 40h10"/>
@@ -197,45 +197,43 @@
     <section class="view" id="view-proxy" hidden>
       <header class="page-head">
         <div>
-          <h1>代理</h1>
-          <p>浏览器的登录、订阅和结账流量都经过这里配置的出口。</p>
+          <h1>代理 IP</h1>
+          <p>默认渠道决定浏览器出口。每次启动浏览器（每笔客户开通）都分配一个新的动态住宅 IP，任务内保持不变。</p>
+        </div>
+        <div class="head-actions">
+          <button class="btn primary" id="addChannelBtn">+ 添加渠道</button>
         </div>
       </header>
 
       <div class="panel" style="margin-bottom:14px">
-        <div class="panel-title">当前状态</div>
+        <div class="panel-title">管理端浏览器 <span class="pill-state" id="relayState">中继检测中…</span></div>
         <div class="proxy-status">
-          <span class="pill-state" id="relayState">中继检测中…</span>
+          <span class="proxy-exit" id="mainLease">—</span>
           <span class="proxy-exit" id="proxyExit">出口 IP 未检测</span>
+        </div>
+        <div class="row gap">
           <button class="btn tiny" id="testIpBtn">检测出口 IP</button>
+          <button class="btn tiny" id="rotateIpBtn" title="kookeey 填了开发者 token 时调接口换 IP，否则换新 session">切换 IP</button>
+          <button class="btn tiny ghost" id="proxyRestartBtn">重启浏览器</button>
         </div>
         <p class="muted small" style="margin:10px 0 0">
-          浏览器固定连本地中继 <code>127.0.0.1:8898</code>，改上游不用重启浏览器；
-          但第一次启用需要点「重启浏览器」让 Chrome 带上代理参数。
+          改了默认渠道后点「切换 IP」即可立即生效，不用重启浏览器；客户开通每单自动用默认渠道的新 IP。
         </p>
       </div>
 
-      <div class="panel">
-        <div class="panel-title">上游代理</div>
-        <div class="field">
-          <input id="proxyInput" class="input" spellcheck="false"
-                 placeholder="gate.example.com:1000:用户名:密码   或   http://用户名:密码@1.2.3.4:8080" />
-          <em class="hint" id="proxyHint">支持 host:port:user:pass（代理商格式）/ http(s):// / socks5://；留空=直连</em>
-        </div>
-        <div class="row gap">
-          <button class="btn primary" id="proxySaveBtn">保存</button>
-          <button class="btn" id="proxyRestartBtn">重启浏览器并应用</button>
-          <button class="btn ghost" id="proxyClearBtn">改回直连</button>
-        </div>
-        <div class="help" style="margin-top:16px">
-          <h3>关于地区价</h3>
-          <ul>
-            <li>结账页的币种/价格由 IP 区域 + 账号账单地区共同决定，换 IP 后需要重新打开订阅页才会刷新。</li>
-            <li>推荐顺序：先设代理 → 重启浏览器 → 打开账号卡片上的 Plus/Pro → 确认币种是 ₱ 再填卡。</li>
-            <li>机房 IP 容易被 Cloudflare 挑战；住宅/移动代理成功率更高。</li>
-            <li>卡的国家与 IP 差异过大时，Stripe 可能直接拒付（风控）。</li>
-          </ul>
-        </div>
+      <div class="section-title">渠道 <span class="muted small">选中的为默认渠道</span></div>
+      <div class="ch-list" id="channelList"></div>
+
+      <div class="section-title">在用的出口 <span class="muted small">每个浏览器一份租约，浏览器关闭即释放</span></div>
+      <div class="ch-list" id="leaseList"></div>
+
+      <div class="panel help" style="margin-top:14px">
+        <h3>关于地区价</h3>
+        <ul>
+          <li>结账页的币种/价格由 IP 区域 + 账号账单地区共同决定，换 IP 后需要重新打开订阅页才会刷新。</li>
+          <li>机房 IP 会被 ChatGPT 当成 VPN 拦截；用动态住宅渠道，地区尽量与卡的账单国家一致。</li>
+          <li>「每个连接都换 IP」会让同一结账流程出现多个 IP，Stripe 容易风控，只建议用来测试。</li>
+        </ul>
       </div>
     </section>
 
@@ -275,7 +273,7 @@
         </div>
       </header>
       <div class="job-list" id="jobList"></div>
-      <div class="empty" id="jobEmpty">
+      <div class="empty hidden" id="jobEmpty">
         <div class="empty-art">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
             <path d="M4 5.5h16M4 12h16M4 18.5h10" stroke-linecap="round"/>
@@ -438,6 +436,67 @@
     <footer class="modal-foot">
       <button class="btn ghost" id="cardCancel">取消</button>
       <button class="btn primary" id="cardSave">保存到卡库</button>
+    </footer>
+  </div>
+</div>
+
+<!-- ───────────── 代理渠道弹窗 ───────────── -->
+<div class="modal hidden" id="channelModal" role="dialog" aria-modal="true">
+  <div class="modal-card">
+    <header class="modal-head">
+      <h3 id="channelModalTitle">添加渠道</h3>
+      <button class="icon-btn" id="channelModalClose" aria-label="关闭">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8">
+          <path d="M6 6l12 12M18 6L6 18" stroke-linecap="round"/>
+        </svg>
+      </button>
+    </header>
+    <div class="modal-body">
+      <div class="field-grid">
+        <label class="field"><span>类型</span>
+          <select id="chType">
+            <option value="kookeey">kookeey 动态住宅</option>
+            <option value="custom">自定义上游</option>
+          </select></label>
+        <label class="field"><span>名称</span><input id="chName" placeholder="kookeey 日本住宅" /></label>
+        <label class="field span2"><span>换 IP 方式</span>
+          <select id="chRotation">
+            <option value="task">每个任务换一个 IP，任务内固定（推荐）</option>
+            <option value="connection">每个连接都换 IP（不适合结账）</option>
+          </select></label>
+      </div>
+
+      <div class="field-grid" id="chKkFields">
+        <label class="field"><span>用户 ID</span><input id="chUid" inputmode="numeric" placeholder="123456789" /></label>
+        <label class="field"><span>开发者 ID <em class="muted">（默认同用户 ID）</em></span><input id="chAccessid" inputmode="numeric" placeholder="可留空" /></label>
+        <label class="field span2"><span>开发者 token <em class="muted">（API 换 IP / 查流量 / 拉账密用，可留空）</em></span>
+          <input id="chToken" type="password" autocomplete="new-password" placeholder="账户中心 → 开发者 token" /></label>
+        <label class="field"><span>提取账号</span><input id="chAuthName" autocomplete="off" placeholder="安全策略用户名" /></label>
+        <label class="field"><span>提取密码</span><input id="chAuthPwd" type="password" autocomplete="new-password" placeholder="安全策略密码" /></label>
+        <div class="field span2">
+          <button class="btn tiny" id="chFetchAuth" type="button">从 kookeey 拉取账密</button>
+          <em class="hint" id="chAuthHint">填好用户 ID 和开发者 token 后可自动获取提取模式账密</em>
+        </div>
+        <label class="field"><span>地区</span><input id="chGeo" placeholder="US / JP / US_California / global" /></label>
+        <label class="field"><span>协议</span>
+          <select id="chProtocol"><option value="http">HTTP</option><option value="socks5">SOCKS5</option></select></label>
+        <label class="field"><span>网关</span><select id="chGateway"></select></label>
+        <label class="field"><span>端口</span><input id="chPort" inputmode="numeric" placeholder="1000" /></label>
+      </div>
+
+      <div class="field-grid hidden" id="chCustomFields">
+        <label class="field span2"><span>上游代理</span>
+          <input id="chUpstream" spellcheck="false" placeholder="http://user-{session}:pass@host:port   或   host:port:user:pass" />
+          <em class="hint">支持 http(s):// / socks5:// / host:port:user:pass。<code>{session}</code> 会替换成 8 位随机串，用于粘性会话</em></label>
+        <label class="field span2"><span>换 IP 链接 <em class="muted">（可选，GET 调用；支持 {session}）</em></span>
+          <input id="chChangeUrl" spellcheck="false" placeholder="https://provider.example/api/change?key=…" /></label>
+      </div>
+
+      <label class="row small"><input type="checkbox" id="chDefault" /> 设为默认渠道</label>
+    </div>
+    <footer class="modal-foot">
+      <button class="btn ghost" id="channelCancel">取消</button>
+      <button class="btn primary" id="channelSave">保存</button>
     </footer>
   </div>
 </div>

@@ -426,3 +426,20 @@ textarea { height: auto; padding: 10px 11px; resize: vertical; line-height: 1.55
   .main { padding: 20px 16px 48px; }
   .two-col { grid-template-columns: 1fr; }
 }
+
+/* ---------------------------- 代理 IP ---------------------------- */
+.section-title { display: flex; align-items: baseline; gap: 10px; font-size: 14px; font-weight: 600; margin: 18px 0 10px; }
+.ch-list { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); }
+.ch-row { display: flex; align-items: center; gap: 14px; padding: 13px 16px; border-bottom: 1px solid var(--line-2); }
+.ch-row:last-child { border-bottom: none; }
+.ch-row.is-default { background: #fcfcfc; }
+.ch-row input[type=radio] { margin: 0; accent-color: var(--ink); flex: none; }
+.ch-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.ch-name { display: flex; align-items: center; gap: 8px; font-weight: 500; }
+.ch-sub { font-family: var(--mono); font-size: 12px; color: var(--ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ch-result { font-family: var(--mono); font-size: 12px; color: var(--ink-2); }
+.ch-result.ok { color: var(--ok); }
+.ch-result.bad { color: var(--bad); }
+.ch-actions { display: flex; gap: 6px; flex: none; }
+.ch-empty { padding: 16px; color: var(--ink-3); font-size: 13px; }
+.jl-proxy { font-family: var(--mono); font-size: 12px; color: var(--ink-2); margin: 8px 0; }

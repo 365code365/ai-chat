@@ -27,24 +27,21 @@ import threading
 import time
 import urllib.parse
 
-import requests
-
 import admin_auth
 import captcha
 import cgpt
-import proxy_relay
-from browser import BROWSER, RELAY_PORT, relay_alive
+from admin_proxy import ProxyAdminMixin
+from browser import BROWSER
 from httpbase import JSONHandler, ThreadingHTTPServer
 from store import (
     DATA_DIR, SHOT_DIR, luhn_ok, card_brand, mask_pan, load_cards, save_cards,
     public_card, normalize_exp, load_store, save_store, public_account, gen_code,
-    ensure_codes, migrate_cards, card_account_ids, atomic_write_json, find_by_id,
+    ensure_codes, migrate_cards, card_account_ids, find_by_id,
     load_jobs, VALID_PLANS, _store_lock,
 )
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 WEB_DIR = os.path.join(HERE, "web")
-PROXY_PATH = os.path.join(DATA_DIR, "proxy.json")
 
 # 卡上可以直接 PATCH 的纯文本字段
 CARD_TEXT_FIELDS = ("label", "holder", "postal", "state", "city", "line1")
@@ -161,7 +158,7 @@ def recheck(acc_id):
 # --------------------------------------------------------------------------- #
 # HTTP
 # --------------------------------------------------------------------------- #
-class Handler(JSONHandler):
+class Handler(ProxyAdminMixin, JSONHandler):
     server_version = "CGPTAdmin/1.0"
 
     def log_message(self, fmt, *args):
@@ -225,12 +222,8 @@ class Handler(JSONHandler):
         try:
             if path == "/api/accounts":
                 return self.api_import()
-            if path == "/api/proxy":
-                return self.api_proxy_save()
-            if path == "/api/proxy/test":
-                return self.api_proxy_test()
-            if path == "/api/proxy/restart":
-                return self.api_proxy_restart()
+            if path.startswith("/api/proxy"):
+                return self.api_proxy_post(path)
             if path == "/api/login":
                 return self.api_login()
             if path == "/api/logout":
@@ -263,6 +256,12 @@ class Handler(JSONHandler):
         path = self._path()
         if not self._guard(path):
             return self._send(401, {"error": "未登录"})
+        mp = re.match(r"^/api/proxy/channels/([^/]+)$", path)
+        if mp:
+            try:
+                return self.api_channel_save(mp.group(1))
+            except Exception as exc:
+                return self._err(exc, 500)
         m = re.match(r"^/api/cards/([^/]+)$", path)
         if not m:
             return self._err("未知接口", 404)
@@ -275,6 +274,12 @@ class Handler(JSONHandler):
         path = self._path()
         if not self._guard(path):
             return self._send(401, {"error": "未登录"})
+        mp = re.match(r"^/api/proxy/channels/([^/]+)$", path)
+        if mp:
+            try:
+                return self.api_channel_delete(mp.group(1))
+            except Exception as exc:
+                return self._err(exc, 500)
         mc = re.match(r"^/api/cards/([^/]+)$", path)
         if mc:
             try:
@@ -298,64 +303,7 @@ class Handler(JSONHandler):
         except Exception as exc:
             return self._err(exc, 500)
 
-    # ---------- 代理 ----------
-    def proxy_payload(self):
-        upstream = proxy_relay.load_upstream()
-        info = None
-        if upstream:
-            try:
-                info = proxy_relay.parse_upstream(upstream)
-            except Exception:
-                info = None
-        alive = relay_alive()
-        return {
-            "upstream": upstream,
-            "valid": bool(info) if upstream else True,
-            "relayPort": RELAY_PORT,
-            "relayAlive": alive,
-            "browserUsesRelay": alive,
-            "hint": "保存后点「重启浏览器」让代理生效" if upstream else "当前直连",
-        }
-
-    def api_proxy_save(self):
-        body = self._body()
-        upstream = (body.get("upstream") or "").strip()
-        if upstream:
-            try:
-                proxy_relay.parse_upstream(upstream)
-            except Exception as exc:
-                return self._err(str(exc))
-        atomic_write_json(PROXY_PATH, {"upstream": upstream, "updatedAt": int(time.time())})
-        return self._send(200, self.proxy_payload())
-
-    def api_proxy_test(self):
-        if not relay_alive():
-            return self._err("中继没在跑，先启动 proxy_relay.py")
-        proxies = {"http": "http://127.0.0.1:%d" % RELAY_PORT,
-                   "https": "http://127.0.0.1:%d" % RELAY_PORT}
-        t0 = time.time()
-        last = ""
-        for url in ("https://api.ipify.org?format=json", "https://ifconfig.co/json"):
-            try:
-                r = requests.get(url, proxies=proxies, timeout=15,
-                                 headers={"User-Agent": "Mozilla/5.0"})
-                if r.ok:
-                    data = r.json()
-                    return self._send(200, {
-                        "ok": True,
-                        "ip": data.get("ip") or data.get("ip_addr") or "",
-                        "country": data.get("country") or data.get("country_iso") or "",
-                        "ms": int((time.time() - t0) * 1000),
-                    })
-                last = "HTTP %d" % r.status_code
-            except Exception as exc:
-                last = str(exc)[:80]
-        return self._send(200, {"ok": False, "error": last or "测试失败"})
-
-    def api_proxy_restart(self):
-        BROWSER.restart()
-        return self._send(200, {"ok": True, "status": self.status_payload(),
-                                "proxy": self.proxy_payload()})
+    # 代理接口见 admin_proxy.ProxyAdminMixin
 
     # ---------- 登录 ----------
     def api_login(self):
@@ -700,10 +648,14 @@ class Handler(JSONHandler):
                 return self._err("plan 只能是 plus / pro")
             with _lock:
                 res = BROWSER.start_checkout(acc, plan)
-            self._update_account(acc_id, lambda cur: cur.update(checkout={
-                "plan": plan, "url": res.get("url", ""),
-                "amount": res.get("amount", ""), "at": int(time.time()),
-            }))
+
+            def remember(cur):
+                cur["checkout"] = {"plan": plan, "url": res.get("url", ""),
+                                   "amount": res.get("amount", ""), "at": int(time.time())}
+                if res.get("amount"):     # 账号卡片的 Plus / Pro 按钮上显示应付金额
+                    cur.setdefault("shots", {}).setdefault(plan, {}).update(
+                        price=res["amount"], at=int(time.time()))
+            self._update_account(acc_id, remember)
             return self._send(200, res)
 
         if action == "card":
@@ -796,7 +748,15 @@ class Handler(JSONHandler):
             return self._send(200, f.read(), "image/png")
 
     def static_file(self, path):
-        return self._static(WEB_DIR, path)
+        # 已登录：直接输出后台界面（隐藏登录框），刷新时不再闪一下登录页
+        transform = _logged_in_html if self._authed() else None
+        return self._static(WEB_DIR, path, extra={"Vary": "Cookie"}, html_transform=transform)
+
+
+def _logged_in_html(body):
+    return (body
+            .replace(b'class="login-wrap" id="loginWrap"', b'class="login-wrap hidden" id="loginWrap"', 1)
+            .replace(b'class="app hidden" id="appRoot"', b'class="app" id="appRoot"', 1))
 
 
 def main():

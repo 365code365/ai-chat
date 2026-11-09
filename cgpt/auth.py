@@ -8,7 +8,7 @@ import time
 import requests
 
 from .config import CHUNK, COOKIE_BASE, UA
-from .cdp import wait_page_ready
+from .cdp import wait_dom_ready
 
 
 def _b64json(part):
@@ -125,7 +125,8 @@ def login_account(cdp, account, timeout=40, url="https://chatgpt.com/"):
         exp = int(time.time()) + 30 * 86400
     set_session_cookies(cdp, account["sessionToken"], exp)
     cdp.call("Page.navigate", url=url)
-    wait_page_ready(cdp)
+    # 不等 load 完成（图片/统计脚本拖尾，冷缓存时多 7s）：文档可用就开始校验会话
+    wait_dom_ready(cdp)
     end = time.time() + timeout
     while time.time() < end:
         email = current_session_email(cdp)

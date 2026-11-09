@@ -216,6 +216,21 @@ def wait_page_ready(cdp, timeout=45):
     return False
 
 
+def wait_dom_ready(cdp, url_prefix="https://", timeout=45):
+    """等新文档可交互（readyState ≠ loading 且已离开 about:blank），不等图片等静态资源。"""
+    end = time.time() + timeout
+    while time.time() < end:
+        try:
+            st = cdp.js("document.readyState + ' ' + location.href", await_promise=False) or ""
+            state, _, href = st.partition(" ")
+            if state in ("interactive", "complete") and href.startswith(url_prefix):
+                return True
+        except Exception:
+            pass
+        time.sleep(0.1)
+    return False
+
+
 def wait_until(predicate, timeout, interval=0.25):
     """在 timeout 内轮询 predicate()，一旦为真立即返回 True（替代固定 sleep）。"""
     end = time.time() + timeout

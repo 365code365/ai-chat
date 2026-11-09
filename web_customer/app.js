@@ -1,286 +1,285 @@
 /* ============================================================
-   客户兑换页逻辑
+   客户付款开通页（支付宝 / 微信）
    ============================================================ */
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 
 const state = {
-  code: "",
-  card: null,
-  plan: "plus",
+  products: [],        // [{id,name,plan,priceYuan}]
+  channels: [],        // ["alipay","wechat"]
+  productId: null,
+  plan: null,
+  channel: null,
+  token: null,
+  orderTimer: null,
   jobId: null,
-  timer: null,
+  jobTimer: null,
+  session: null,
 };
 
 async function api(path, opts = {}) {
-  const res = await fetch(path, {
-    headers: { "Content-Type": "application/json" },
-    ...opts,
-  });
+  const res = await fetch(path, { headers: { "Content-Type": "application/json" }, ...opts });
   let data = {};
   try { data = await res.json(); } catch (e) { data = { error: `HTTP ${res.status}` }; }
   if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
   return data;
 }
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => (
+  { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
-function esc(s) {
-  return String(s ?? "").replace(/[&<>"']/g, (c) => (
-    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
-  ));
+/* ------------------------------- 套餐 ------------------------------- */
+async function loadProducts() {
+  let d;
+  try { d = await api("/api/pay/products"); }
+  catch (e) { d = { products: [], channels: [], enabled: false }; }
+  state.products = d.products || [];
+  state.channels = d.channels || [];
+  renderPlans();
+  // 默认选中「推荐」的卡片（没有就选第一张），右侧不再是空的
+  const pre = $("#planCols .plan-col.recommend") || $("#planCols .plan-col");
+  if (pre) selectCol(pre);
+  renderChannels(d.enabled);
 }
 
-function setStep(n) {
-  $$(".step").forEach((s) => s.classList.toggle("hidden", s.id !== `step${n}`));
-  $$(".pstep").forEach((p) => {
-    const i = Number(p.dataset.s);
-    p.classList.toggle("active", i === n);
-    p.classList.toggle("done", i < n);
+// 后台配置的套餐：标题相同的合成一张卡，档位（variant）做切换
+function groupProducts() {
+  const groups = [];
+  const byTitle = {};
+  state.products.forEach((p) => {
+    if (!byTitle[p.title]) { byTitle[p.title] = []; groups.push(byTitle[p.title]); }
+    byTitle[p.title].push(p);
   });
-  $("#stepCount").textContent = `第 ${n} 步，共 3 步`;
-  window.scrollTo({ top: 0 });
+  return groups;
 }
 
-// 卡组织标识（与管理端一致）
-const BRAND_LOGO = {
-  visa: '<span class="logo-visa">VISA</span>',
-  mastercard: '<svg viewBox="0 0 26 16" width="26" height="16" aria-label="Mastercard">'
-    + '<circle cx="9" cy="8" r="7" fill="#EB001B"/><circle cx="17" cy="8" r="7" fill="#F79E1B"/>'
-    + '<path d="M13 2.26A7 7 0 0 1 13 13.74A7 7 0 0 1 13 2.26Z" fill="#FF5F00"/></svg>',
-  amex: '<span class="logo-amex">AMEX</span>',
-  jcb: '<span class="logo-text" style="color:#0b6b3a">JCB</span>',
-  unionpay: '<span class="logo-text" style="color:#c81f26">银联</span>',
-  discover: '<span class="logo-text" style="color:#e35205">DISC</span>',
-  diners: '<span class="logo-text" style="color:#0b3d91">DINERS</span>',
-  card: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="#8e8e98" stroke-width="1.7">'
-    + '<rect x="3" y="6" width="18" height="12" rx="2"/><path d="M3 10h18"/></svg>',
-};
+function bulletsHtml(p) {
+  return (p.bullets || []).map((b) => `<li>${esc(b)}</li>`).join("");
+}
 
-/* ------------------------------- 第一步 ------------------------------- */
-const codeInput = $("#codeInput");
-codeInput.addEventListener("input", () => {
-  const raw = codeInput.value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 10);
-  codeInput.value = raw.replace(/(.{4})(.{4})(.{2})/, "$1-$2-$3").replace(/-$/, "");
-});
+// 切到某个档位：价格 / 副标题 / 说明 / 权益都跟着换
+function fillCol(col, p) {
+  col.dataset.pid = p.id;
+  $(".pv-price", col).textContent = p.priceYuan;
+  $(".plan-sub", col).textContent = p.subtitle || "";
+  $(".plan-desc", col).textContent = p.desc || "";
+  $(".plan-desc", col).classList.toggle("hidden", !p.desc);
+  $(".plan-bullets", col).innerHTML = bulletsHtml(p);
+  col.classList.toggle("recommend", !!p.recommend);
+}
 
-async function verify() {
-  const code = codeInput.value.trim().toUpperCase();
-  if (code.replace(/-/g, "").length < 6) {
-    return showHint("兑换码不完整", "bad");
+function renderPlans() {
+  const groups = groupProducts();
+  $("#planCols").innerHTML = groups.map((items, gi) => {
+    const first = items[0];
+    const chips = items.length > 1
+      ? `<div class="plan-variants">${items.map((p, i) =>
+          `<button class="pv ${i === 0 ? "on" : ""}" data-pid="${esc(p.id)}">${esc(p.variant || p.priceYuan)}</button>`).join("")}</div>`
+      : "";
+    return `<div class="plan-col ${first.recommend ? "recommend" : ""}" data-g="${gi}" data-pid="${esc(first.id)}">
+      <div class="plan-top">
+        <div class="plan-name">${esc(first.title)}</div>
+        ${chips}
+      </div>
+      <div class="plan-sub">${esc(first.subtitle || "")}</div>
+      <div class="plan-desc ${first.desc ? "" : "hidden"}">${esc(first.desc || "")}</div>
+      <button class="btn plan-pick">选择此套餐</button>
+      <div class="plan-price"><span class="cur">¥</span><b class="pv-price">${esc(first.priceYuan)}</b><span class="per">/月</span></div>
+      <div class="plan-price-note">人民币计价 · 以收银台最终金额为准</div>
+      <ul class="plan-bullets">${bulletsHtml(first)}</ul>
+    </div>`;
+  }).join("") || '<div class="pay-note">暂未上架套餐</div>';
+  $("#planCols").classList.toggle("one", groups.length === 1);
+  $("#planCols").classList.toggle("three", groups.length >= 3);
+
+  // 档位切换
+  $$("#planCols .pv").forEach((chip) => chip.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const col = chip.closest(".plan-col");
+    $$(".pv", col).forEach((x) => x.classList.toggle("on", x === chip));
+    const p = state.products.find((x) => x.id === chip.dataset.pid);
+    if (!p) return;
+    fillCol(col, p);
+    selectCol(col);
+  }));
+  $$("#planCols .plan-col").forEach((col) => {
+    const pick = () => selectCol(col);
+    col.addEventListener("click", pick);
+    $(".plan-pick", col).addEventListener("click", (e) => { e.stopPropagation(); pick(); });
+  });
+}
+
+function selectCol(col) {
+  $$("#planCols .plan-col").forEach((c) => c.classList.toggle("on", c === col));
+  selectProduct(col.dataset.pid);
+}
+
+function selectProduct(pid) {
+  const p = state.products.find((x) => x.id === pid);
+  if (!p) return;
+  state.productId = p.id;
+  state.plan = p.plan;
+  $("#chosenBox").innerHTML = `<div class="chosen-row"><b>${esc(p.name || p.title)}</b><span>¥${esc(p.priceYuan)}</span></div>`;
+  refreshPayBtn();
+}
+
+function renderChannels(enabled) {
+  if (!state.channels.length) {
+    $("#payDisabled").classList.remove("hidden");
   }
-  const btn = $("#verifyBtn");
-  btn.classList.add("loading");
-  btn.disabled = true;
+  $$(".pay-chan").forEach((el) => {
+    const ok = state.channels.includes(el.dataset.ch);
+    el.classList.toggle("disabled", !ok);
+    $("input", el).disabled = !ok;
+  });
+  if (state.channels.length === 1) {
+    const only = $(`.pay-chan[data-ch="${state.channels[0]}"] input`);
+    if (only) { only.checked = true; state.channel = state.channels[0]; }
+  }
+  refreshPayBtn();
+}
+
+$$('input[name="chan"]').forEach((r) => r.addEventListener("change", () => {
+  state.channel = r.value; refreshPayBtn();
+}));
+["payEmail", "payContact"].forEach((id) => $("#" + id).addEventListener("input", refreshPayBtn));
+
+function refreshPayBtn() {
+  const ok = state.productId && state.channel && $("#payEmail").value.trim() && $("#payContact").value.trim();
+  $("#payBtn").disabled = !ok;
+}
+
+/* ------------------------------- 下单 + 扫码 ------------------------------- */
+function payHint(msg, kind = "") { const el = $("#payHint"); el.textContent = msg || ""; el.className = `hint ${kind}`; }
+
+async function pay() {
+  const email = $("#payEmail").value.trim();
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return payHint("请填写正确的充值邮箱", "bad");
+  const btn = $("#payBtn"); btn.classList.add("loading"); btn.disabled = true;
+  payHint("");
   try {
-    const d = await api("/api/verify", {
-      method: "POST",
-      body: JSON.stringify({ code }),
-    });
-    if (!d.ok) return showHint(d.error || "兑换码无效", "bad");
-    state.code = code;
-    state.card = d.card;
-    applyPlans(d.plans || ["plus", "pro"]);
-    const key = d.card.brandKey || "card";
-    $("#cardBrandIcon").innerHTML = BRAND_LOGO[key] || BRAND_LOGO.card;
-    $("#cardLast4").textContent = d.card.last4 || "••••";
-    $("#cardExp").textContent = d.card.exp || "--/--";
-    $("#cardLabel").textContent = d.card.brand || "银行卡";
-    showHint("");
-    setStep(2);
+    const d = await api("/api/pay/create", { method: "POST", body: JSON.stringify({
+      channel: state.channel, productId: state.productId, email, contact: $("#payContact").value.trim(),
+    }) });
+    state.token = d.token;
+    $("#qrTitle").textContent = (state.channel === "alipay" ? "支付宝" : "微信") + "扫码支付";
+    $("#qrAmount").textContent = "¥" + d.amountYuan;
+    $("#qrImg").src = d.qrImg || "";
+    $("#qrTip").textContent = d.qrImg
+      ? "请用手机打开对应 App 扫码支付，支付成功后自动继续。"
+      : "二维码生成失败，请联系客服（订单号 " + d.outTradeNo + "）。";
+    $("#qrOverlay").classList.remove("hidden");
+    startOrderPoll();
   } catch (e) {
-    showHint(e.message, "bad");
+    payHint(e.message, "bad");
   } finally {
-    btn.classList.remove("loading");
-    btn.disabled = false;
+    btn.classList.remove("loading"); refreshPayBtn();
   }
 }
+$("#payBtn").addEventListener("click", pay);
 
-function showHint(msg, kind = "") {
-  const el = $("#codeHint");
-  el.textContent = msg;
-  el.className = `hint ${kind}`;
+function stopOrderPoll() { if (state.orderTimer) { clearInterval(state.orderTimer); state.orderTimer = null; } }
+function startOrderPoll() {
+  stopOrderPoll();
+  state.orderTimer = setInterval(async () => {
+    try {
+      const o = await api(`/api/pay/order/${state.token}`);
+      if (o.paid) { stopOrderPoll(); onPaid(); }
+      else if (o.status === "expired") { stopOrderPoll(); $("#qrPoll").innerHTML = "二维码已过期，请关闭后重试。"; }
+    } catch (e) { /* 继续轮询 */ }
+  }, 3000);
+}
+$("#qrClose").addEventListener("click", () => { $("#qrOverlay").classList.add("hidden"); stopOrderPoll(); });
+
+/* ------------------------------- 付款成功 → 开通 ------------------------------- */
+function onPaid() {
+  $("#qrOverlay").classList.add("hidden");
+  $("#actStage").classList.remove("hidden");
+  $("#actProcessing").classList.add("hidden");
+  $("#actResult").classList.add("hidden");
+  $("#actOverlay").classList.remove("hidden");
 }
 
-$("#verifyBtn").addEventListener("click", verify);
-codeInput.addEventListener("keydown", (e) => {
-  if (e.key === "Enter") verify();
-});
-
-/* ------------------------------- 第二步 ------------------------------- */
-function applyPlans(allowed) {
-  const all = $$(".plan");
-  all.forEach((b) => b.classList.toggle("hidden", !allowed.includes(b.dataset.plan)));
-  const first = all.find((b) => !b.classList.contains("hidden"));
-  state.plan = first ? first.dataset.plan : "plus";
-  all.forEach((b) => b.classList.toggle("selected", b === first));
-  $("#planNote").textContent = allowed.length === 1
-    ? `这个兑换码只能开通 ${allowed[0] === "pro" ? "Pro" : "Plus"}。`
-    : "";
-}
-
-$$(".plan").forEach((b) => {
-  b.addEventListener("click", () => {
-    state.plan = b.dataset.plan;
-    $$(".plan").forEach((x) => x.classList.toggle("selected", x === b));
-  });
-});
-$$(".plan")[0].classList.add("selected");
-
-/* ---------------- 登录信息：客户在自己浏览器里打开页面，复制粘贴 ---------------- */
-state.session = null;   // 校验通过后的 { raw, email, expires }
-
-// 解析粘贴内容。复制整页时可能带上「美观输出」之类的页面文字，所以只取最外层的 {...}。
 function parseSession(text) {
   const t = (text || "").trim();
   if (!t) return { empty: true };
-  const start = t.indexOf("{");
-  const end = t.lastIndexOf("}");
-  if (start < 0 || end <= start) {
-    return { error: "没识别到登录信息，请确认复制的是「登录信息页面」的全部内容" };
-  }
-  let obj;
-  try {
-    obj = JSON.parse(t.slice(start, end + 1));
-  } catch (e) {
-    return { error: "内容不完整，可能没复制全。请回到那个页面按 Ctrl/⌘+A 全选后重新复制" };
-  }
-  if (!obj || typeof obj !== "object" || !Object.keys(obj).length) {
-    return { error: "粘贴的是 {}：这个浏览器还没登录 ChatGPT。请先完成第 1 步登录，再重新打开页面" };
-  }
-  if (!obj.accessToken) {
-    return { error: "内容里没有登录凭证，请确认打开的是 chatgpt.com/api/auth/session" };
-  }
-  if (!obj.sessionToken) {
-    return { error: "登录信息不完整（缺少 sessionToken），请复制该页面的全部内容" };
-  }
+  const a = t.indexOf("{"), b = t.lastIndexOf("}");
+  if (a < 0 || b <= a) return { error: "没识别到登录信息，请复制「登录信息页面」的全部内容" };
+  let obj; try { obj = JSON.parse(t.slice(a, b + 1)); }
+  catch (e) { return { error: "内容不完整，请回到那个页面全选后重新复制" }; }
+  if (!obj || !Object.keys(obj).length) return { error: "粘贴的是 {}：这个浏览器还没登录 ChatGPT" };
+  if (!obj.accessToken) return { error: "内容里没有登录凭证，请确认打开的是 /api/auth/session" };
+  if (!obj.sessionToken) return { error: "登录信息不完整（缺少 sessionToken），请复制全部内容" };
   const exp = obj.expires ? Date.parse(obj.expires) : NaN;
-  if (!Number.isNaN(exp) && exp < Date.now()) {
-    return { error: "登录信息已过期，请刷新那个页面后重新复制" };
-  }
-  return {
-    raw: JSON.stringify(obj),
-    email: obj.user?.email || "",
-    expires: Number.isNaN(exp) ? "" : new Date(exp).toLocaleDateString("zh-CN"),
-  };
+  if (!Number.isNaN(exp) && exp < Date.now()) return { error: "登录信息已过期，请刷新那个页面后重新复制" };
+  return { raw: JSON.stringify(obj), email: obj.user?.email || "" };
 }
 
-function markGuide(n, done) {
-  $(`#gs${n}`)?.classList.toggle("done", !!done);
-}
-
-function validateSession() {
-  const r = parseSession($("#sessionInput").value);
-  const box = $("#sessionStatus");
+function validateAct() {
+  const r = parseSession($("#actSession").value);
+  const box = $("#actStatus");
   state.session = r.raw ? r : null;
-  $("#subscribeBtn").disabled = !state.session;
-  markGuide(3, !!state.session);
-  if (r.empty) {
-    box.className = "session-status";
-    box.innerHTML = "";
-  } else if (r.error) {
-    box.className = "session-status bad";
-    box.textContent = r.error;
-  } else {
-    markGuide(1, true);
-    markGuide(2, true);
+  $("#actBtn").disabled = !state.session;
+  $("#ags3").classList.toggle("done", !!state.session);
+  if (r.empty) { box.className = "session-status"; box.innerHTML = ""; }
+  else if (r.error) { box.className = "session-status bad"; box.textContent = r.error; }
+  else {
+    $("#ags1").classList.add("done"); $("#ags2").classList.add("done");
     box.className = "session-status ok";
-    box.innerHTML = `<b>${esc(r.email || "已识别登录信息")}</b>`
-      + `<span>请确认这是要开通的账号${r.expires ? `，登录有效期至 ${esc(r.expires)}` : ""}。</span>`;
+    box.innerHTML = `<b>${esc(r.email || "已识别登录信息")}</b><span>请确认这是要开通的账号。</span>`;
   }
-  $("#sessionHint").textContent = "";
 }
+$("#actSession").addEventListener("input", validateAct);
 
-$("#sessionInput").addEventListener("input", validateSession);
-$("#openSessionBtn").addEventListener("click", () => markGuide(2, true));
-$("#pasteBtn").addEventListener("click", async () => {
+async function activate() {
+  validateAct();
+  if (!state.session) return;
+  const btn = $("#actBtn"); btn.classList.add("loading"); btn.disabled = true;
   try {
-    const text = await navigator.clipboard.readText();
-    $("#sessionInput").value = text;
-    validateSession();
+    const d = await api("/api/pay/activate", { method: "POST", body: JSON.stringify({
+      token: state.token, session: state.session.raw }) });
+    state.jobId = d.jobId;
+    $("#actStage").classList.add("hidden");
+    $("#actProcessing").classList.remove("hidden");
+    startJobPoll();
   } catch (e) {
-    // 部分浏览器不允许网页直接读剪贴板
-    const box = $("#sessionStatus");
-    box.className = "session-status bad";
-    box.textContent = "浏览器不允许直接读取剪贴板，请点击下方输入框，按 Ctrl/⌘ + V 粘贴";
-    $("#sessionInput").focus();
+    const box = $("#actStatus"); box.className = "session-status bad"; box.textContent = e.message;
+    btn.classList.remove("loading"); btn.disabled = false;
   }
-});
+}
+$("#actBtn").addEventListener("click", activate);
 
-/* ------------------------------- 第三步 ------------------------------- */
-// 把内部的技术报错翻译成客户能看懂、且不泄露实现细节的话术。
 function friendlyError(raw) {
   const m = String(raw || "").toLowerCase();
-  if (/过期|expired|登录信息|session|sessiontoken|401|未登录/.test(m)) {
-    return "登录信息可能已失效，请返回重新获取后再试。";
-  }
-  if (/当前套餐|已经是|already/.test(m)) {
-    return "这个账号可能已经是该套餐了，请确认后再试。";
-  }
-  // 其余一律给通用话术，不暴露内部步骤 / 报错
-  return "开通没有成功，可以返回重试，或联系客服处理。";
+  if (/过期|expired|登录|session|401/.test(m)) return "登录信息可能已失效，请重新获取后再试。";
+  if (/库存|客服/.test(m)) return raw;
+  if (/当前套餐|已经是|already/.test(m)) return "这个账号可能已经是该套餐了，请确认后再试。";
+  return "开通未成功，请凭下单联系方式联系客服处理，款项不受影响。";
 }
 
-function finishJob(ok, raw) {
-  clearInterval(state.timer);
-  state.timer = null;
-  $("#processing").classList.add("hidden");
-  const box = $("#result");
-  box.classList.remove("hidden", "ok", "bad");
-  box.classList.add(ok ? "ok" : "bad");
-  box.innerHTML = ok
-    ? "<b>开通成功</b><br>订阅已提交，请回到 ChatGPT 查看。如果银行要求验证，请按提示完成。你的兑换码已使用。"
-    : `<b>暂时没有开通</b><br>${esc(friendlyError(raw))}<br>兑换码没有被使用，不会浪费。`;
-  $("#retryBtn").classList.toggle("hidden", ok);
+function stopJobPoll() { if (state.jobTimer) { clearInterval(state.jobTimer); state.jobTimer = null; } }
+function startJobPoll() {
+  stopJobPoll();
+  const tick = async () => {
+    try {
+      const job = await api(`/api/job/${state.jobId}`);
+      if (job.done) {
+        stopJobPoll();
+        $("#actProcessing").classList.add("hidden");
+        const box = $("#actResult"); box.classList.remove("hidden", "ok", "bad");
+        box.classList.add(job.ok ? "ok" : "bad");
+        box.innerHTML = job.ok
+          ? "<b>开通成功 🎉</b><br>订阅已提交，请回到 ChatGPT 查看。如银行要求验证请按提示完成。"
+          : `<b>暂未开通</b><br>${esc(friendlyError(job.message))}`;
+      }
+    } catch (e) { /* 继续 */ }
+  };
+  state.jobTimer = setInterval(tick, 1500); tick();
 }
-
-async function pollJob() {
-  try {
-    const job = await api(`/api/job/${state.jobId}`);
-    // 只显示一个「处理中」，不暴露内部步骤
-    if (job.done) {
-      finishJob(!!job.ok, job.message);
-    }
-  } catch (e) {
-    // 轮询偶发失败不打断，继续等；真正结果以 job.done 为准
+$("#actClose").addEventListener("click", () => {
+  if (state.jobId && !$("#actResult").classList.contains("ok")) {
+    if (!confirm("开通可能还在进行，确定关闭？订单号已保存，可联系客服。")) return;
   }
-}
-
-$("#retryBtn").addEventListener("click", () => {
-  $("#result").classList.add("hidden");
-  $("#retryBtn").classList.add("hidden");
-  $("#processing").classList.remove("hidden");
-  setStep(2);
+  $("#actOverlay").classList.add("hidden"); stopJobPoll();
 });
 
-async function subscribe() {
-  validateSession();
-  if (!state.session) {
-    $("#sessionHint").textContent = "请先按上面 3 步获取并粘贴登录信息";
-    $("#sessionHint").className = "hint bad";
-    return;
-  }
-  const session = state.session.raw;
-  const btn = $("#subscribeBtn");
-  btn.classList.add("loading");
-  btn.disabled = true;
-  try {
-    const d = await api("/api/subscribe", {
-      method: "POST",
-      body: JSON.stringify({ code: state.code, plan: state.plan, session }),
-    });
-    state.jobId = d.jobId;
-    $("#result").classList.add("hidden");
-    $("#retryBtn").classList.add("hidden");
-    $("#processing").classList.remove("hidden");
-    setStep(3);
-    state.timer = setInterval(pollJob, 1500);
-    pollJob();
-  } catch (e) {
-    // 提交时的校验错误（兑换码无效 / 登录信息过期等）本身就是友好话术，直接显示
-    $("#sessionHint").textContent = e.message;
-    $("#sessionHint").className = "hint bad";
-    btn.classList.remove("loading");
-    btn.disabled = false;
-  }
-}
-
-$("#subscribeBtn").addEventListener("click", subscribe);
+loadProducts();

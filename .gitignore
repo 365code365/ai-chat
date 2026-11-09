@@ -7,6 +7,8 @@ __pycache__/
 # 会话导出与原始 token 文件
 新建文本文档.txt
 doc/
+# 发布凭据
+deploy/.deploy.env
 
 # 日志
 *.log

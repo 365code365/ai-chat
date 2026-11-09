@@ -3,129 +3,123 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>ChatGPT 订阅兑换</title>
+<title>ChatGPT 会员充值</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='16' fill='%230d0d0d'/%3E%3Ccircle cx='16' cy='16' r='6' fill='white'/%3E%3C/svg%3E" />
 <link rel="stylesheet" href="/style.css" />
 </head>
 <body>
-<div class="page">
+<div class="pay-page">
 
-  <header class="top">
-    <div class="wordmark"><span class="wm-mark"></span>ChatGPT 订阅兑换</div>
-    <span class="step-count" id="stepCount">第 1 步，共 3 步</span>
+  <header class="pay-top">
+    <div class="wordmark"><span class="wm-mark"></span>ChatGPT 会员充值</div>
+    <a class="pay-redeem-link" href="/redeem.html">有兑换码？点此 →</a>
   </header>
-  <div class="progress" aria-hidden="true">
-    <span class="pstep active" data-s="1"></span>
-    <span class="pstep" data-s="2"></span>
-    <span class="pstep" data-s="3"></span>
+
+  <div class="pay-feats">
+    <div class="feat"><b>✓ 无需提供密码</b><span>仅填写充值邮箱，无需密码</span></div>
+    <div class="feat"><b>⚡ 自动充值</b><span>付款后按指引完成，权益直接激活到账号</span></div>
+    <div class="feat"><b>🔎 订单进度可查询</b><span>充值状态与进度随时可查看</span></div>
+    <div class="feat"><b>🧾 账号安全</b><span>登录信息仅本页使用，不会外发</span></div>
   </div>
 
-  <main>
-    <!-- 第一步 -->
-    <section class="step" id="step1">
-      <h1>输入兑换码</h1>
-      <p class="lead">兑换码已经绑定好支付方式，你不需要提供任何银行卡信息。</p>
+  <div class="pay-note hidden" id="payDisabled">
+    在线支付暂未开通。如有兑换码，请 <a href="/redeem.html">点此用兑换码开通</a>。
+  </div>
 
-      <label class="label" for="codeInput">兑换码</label>
-      <div class="code-box">
-        <input id="codeInput" autocomplete="off" spellcheck="false"
-               placeholder="XXXX-XXXX-XX" maxlength="14" />
-        <button class="btn primary" id="verifyBtn">继续</button>
+  <main class="pay-main">
+    <!-- 左：套餐 -->
+    <section class="pay-plans" id="planCols"></section>
+
+    <!-- 右：账号 + 支付 -->
+    <aside class="pay-side">
+      <div class="pay-card">
+        <div class="pay-card-head"><span class="num">1</span> 选择套餐</div>
+        <div class="pay-chosen" id="chosenBox"><span class="muted">请选择左侧套餐</span></div>
       </div>
-      <p class="hint" id="codeHint"></p>
 
-      <div class="how">
-        <h2>开通流程</h2>
-        <ol>
-          <li><b>验证兑换码</b><span>系统找到兑换码对应的支付方式。</span></li>
-          <li><b>提供登录信息</b><span>按页面指引打开 ChatGPT 的登录信息页，复制后粘贴回来。</span></li>
-          <li><b>自动开通</b><span>系统登录你的账号并完成付款，大约需要 1 分钟。</span></li>
-        </ol>
+      <div class="pay-card">
+        <div class="pay-card-head"><span class="num">2</span> 填写充值账号</div>
+        <label class="pay-field">
+          <span>ChatGPT 充值邮箱 <em>必填</em></span>
+          <input id="payEmail" type="email" autocomplete="email" placeholder="填写您要充值或续费的账号" />
+          <em class="pay-tip">请确认账号邮箱填写无误</em>
+        </label>
+        <label class="pay-field">
+          <span>下单联系方式 <em>必填</em></span>
+          <input id="payContact" autocomplete="off" placeholder="手机 / 邮箱 / QQ / 微信" />
+          <em class="pay-tip">用于核对与查询订单，请填写常用联系方式</em>
+        </label>
       </div>
-    </section>
 
-    <!-- 第二步 -->
-    <section class="step hidden" id="step2">
-      <h1>确认并开通</h1>
-      <p class="lead">选择套餐，然后提供要开通的 ChatGPT 账号的登录信息。</p>
-
-      <div class="card-ready">
-        <span class="card-icon" id="cardBrandIcon"></span>
-        <div class="card-text">
-          <b id="cardLabel">银行卡</b>
-          <span>•••• <em id="cardLast4">0000</em> · 有效期 <em id="cardExp">--/--</em></span>
+      <div class="pay-card">
+        <div class="pay-card-head"><span class="num">3</span> 确认支付</div>
+        <div class="pay-channels" id="payChannels">
+          <label class="pay-chan" data-ch="alipay">
+            <input type="radio" name="chan" value="alipay" /><span class="chan-ico ali">支</span> 支付宝
+          </label>
+          <label class="pay-chan" data-ch="wechat">
+            <input type="radio" name="chan" value="wechat" /><span class="chan-ico wx">微</span> 微信支付
+          </label>
         </div>
-        <span class="tag ok">已匹配</span>
+        <button class="btn primary block" id="payBtn" disabled>确认支付</button>
+        <p class="hint" id="payHint"></p>
+        <p class="hint center">付款由 OpenAI 收款渠道完成，开通由系统自动进行。</p>
       </div>
-
-      <div class="field">
-        <span class="label">套餐</span>
-        <div class="plans">
-          <button class="plan" data-plan="plus">
-            <b>ChatGPT Plus</b><span>适合日常使用</span>
-          </button>
-          <button class="plan" data-plan="pro">
-            <b>ChatGPT Pro</b><span>更高用量，可用最强模型</span>
-          </button>
-        </div>
-        <p class="hint" id="planNote"></p>
-      </div>
-
-      <div class="field">
-        <span class="label">登录信息</span>
-        <ol class="guide">
-          <li class="guide-step" id="gs1">
-            <i>1</i>
-            <div class="guide-body">
-              <b>登录要开通的账号</b>
-              <span>在这个浏览器打开 chatgpt.com，确认登录的是你要开通 Plus / Pro 的账号。</span>
-              <a class="btn ghost sm" href="https://chatgpt.com/" target="_blank" rel="noopener">打开 chatgpt.com</a>
-            </div>
-          </li>
-          <li class="guide-step" id="gs2">
-            <i>2</i>
-            <div class="guide-body">
-              <b>打开登录信息页面</b>
-              <span>新标签页会显示一段以 <code>{"user"</code> 开头的文字。如果只显示 <code>{}</code>，说明还没登录，请先完成第 1 步。</span>
-              <a class="btn dark sm" id="openSessionBtn" href="https://chatgpt.com/api/auth/session"
-                 target="_blank" rel="noopener">打开登录信息页面</a>
-            </div>
-          </li>
-          <li class="guide-step" id="gs3">
-            <i>3</i>
-            <div class="guide-body">
-              <b>复制全部内容，粘贴到下面</b>
-              <span>在那个页面按 <kbd>Ctrl+A</kbd> 全选、<kbd>Ctrl+C</kbd> 复制（Mac 用 <kbd>⌘</kbd>）。手机上长按文字，选择全选后复制。</span>
-              <textarea id="sessionInput" spellcheck="false" autocomplete="off"
-                placeholder="在这里粘贴"></textarea>
-              <div class="paste-row">
-                <button class="btn ghost sm" id="pasteBtn" type="button">从剪贴板粘贴</button>
-              </div>
-              <div class="session-status" id="sessionStatus"></div>
-            </div>
-          </li>
-        </ol>
-        <p class="hint" id="sessionHint"></p>
-      </div>
-
-      <button class="btn primary block" id="subscribeBtn" disabled>开始订阅</button>
-      <p class="hint center">登录信息相当于账号密码，只在本页使用，不要发给任何人。扣款由 OpenAI 完成。</p>
-    </section>
-
-    <!-- 第三步 -->
-    <section class="step hidden" id="step3">
-      <div class="processing" id="processing">
-        <div class="spinner" aria-hidden="true"></div>
-        <h1 id="progressTitle">正在开通订阅</h1>
-        <p class="lead" id="progressMsg">大约需要 1 分钟，请保持页面打开，不要刷新或关闭。</p>
-      </div>
-      <div class="result hidden" id="result"></div>
-      <button class="btn ghost block hidden" id="retryBtn">返回重试</button>
-    </section>
+    </aside>
   </main>
 
-  <footer class="foot">卡信息加密存储，页面不显示完整卡号。每个兑换码只能使用一次。</footer>
+  <footer class="foot">会员权益直接激活到你填写的账号。遇到问题请通过下单联系方式联系客服。</footer>
 </div>
+
+<!-- 扫码支付浮层 -->
+<div class="pay-overlay hidden" id="qrOverlay">
+  <div class="pay-modal">
+    <button class="pay-x" id="qrClose" aria-label="关闭">✕</button>
+    <h3 id="qrTitle">扫码支付</h3>
+    <div class="pay-amount" id="qrAmount">¥0.00</div>
+    <img id="qrImg" class="pay-qr" alt="支付二维码" />
+    <p class="pay-qr-tip" id="qrTip">请用手机打开对应 App 扫码支付，支付成功后页面会自动继续。</p>
+    <div class="pay-poll" id="qrPoll"><span class="dot"></span> 正在等待支付…</div>
+  </div>
+</div>
+
+<!-- 开通浮层（付款成功后，粘贴登录态自动开通） -->
+<div class="pay-overlay hidden" id="actOverlay">
+  <div class="pay-modal wide">
+    <button class="pay-x" id="actClose" aria-label="关闭">✕</button>
+    <div id="actStage">
+      <h3>✓ 支付成功，开始为你开通</h3>
+      <p class="pay-qr-tip">请提供要开通的 ChatGPT 账号登录信息，系统会自动完成开通（约 1 分钟）。</p>
+      <ol class="guide">
+        <li class="guide-step" id="ags1"><i>1</i><div class="guide-body">
+          <b>登录要开通的账号</b>
+          <span>在本浏览器打开 chatgpt.com，确认登录的是要充值的账号。</span>
+          <a class="btn ghost sm" href="https://chatgpt.com/" target="_blank" rel="noopener">打开 chatgpt.com</a>
+        </div></li>
+        <li class="guide-step" id="ags2"><i>2</i><div class="guide-body">
+          <b>打开登录信息页面</b>
+          <span>新标签会显示一段以 <code>{"user"</code> 开头的文字；若只有 <code>{}</code> 说明未登录。</span>
+          <a class="btn dark sm" href="https://chatgpt.com/api/auth/session" target="_blank" rel="noopener">打开登录信息页面</a>
+        </div></li>
+        <li class="guide-step" id="ags3"><i>3</i><div class="guide-body">
+          <b>复制全部内容，粘贴到下面</b>
+          <span>在那个页面 <kbd>Ctrl/⌘+A</kbd> 全选、<kbd>Ctrl/⌘+C</kbd> 复制。</span>
+          <textarea id="actSession" spellcheck="false" placeholder="在这里粘贴"></textarea>
+          <div class="session-status" id="actStatus"></div>
+        </div></li>
+      </ol>
+      <button class="btn primary block" id="actBtn" disabled>开始开通</button>
+      <p class="hint center">登录信息相当于账号密码，只在本页使用。订单号已保存，可凭联系方式找客服。</p>
+    </div>
+    <div id="actProcessing" class="hidden processing">
+      <div class="spinner"></div>
+      <h3>正在开通订阅</h3>
+      <p class="pay-qr-tip">大约需要 1 分钟，请保持页面打开，不要刷新或关闭。</p>
+    </div>
+    <div id="actResult" class="result hidden"></div>
+  </div>
+</div>
+
 <script src="/app.js"></script>
 </body>
 </html>

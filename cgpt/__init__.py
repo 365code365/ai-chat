@@ -5,4 +5,4 @@ from .auth import *  # noqa: F401,F403
 from .plans import *  # noqa: F401,F403
 from .cards import *  # noqa: F401,F403
 
-from . import config, cdp, auth, plans, cards  # noqa: F401
+from . import config, cdp, auth, plans, cards, fingerprint  # noqa: F401

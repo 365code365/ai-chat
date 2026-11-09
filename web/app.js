@@ -228,12 +228,40 @@ $("#logoutBtn").addEventListener("click", async () => {
 });
 
 /* ------------------------------- 导航 ------------------------------- */
-function setView(view) {
+/* 路由：#/plans、#/pay/wechat … 刷新 / 收藏 / 浏览器后退都停在当前页。
+   用 hash 不用路径：不需要改服务端，也不和书签导入的 #import= 冲突。 */
+const VIEWS = new Set($$(".view").map((v) => v.id.replace(/^view-/, "")));
+
+function routeHash(view, sub) {
+  return "#/" + view + (sub ? "/" + sub : "");
+}
+
+function parseRoute() {
+  const m = (location.hash || "").match(/^#\/([a-z]+)(?:\/([a-z]+))?\/?$/);
+  return m && VIEWS.has(m[1]) ? { view: m[1], sub: m[2] || "" } : null;
+}
+
+function setView(view, opts = {}) {
+  if (!VIEWS.has(view)) view = "accounts";
   state.view = view;
   if (view === "proxy" && typeof loadProxy === "function") loadProxy();
+  if ((view === "pay" || view === "plans") && typeof loadPay === "function") loadPay();
   if (view === "logs") loadJobs();
   $$(".nav-item").forEach((b) => b.classList.toggle("active", b.dataset.view === view));
   $$(".view").forEach((v) => (v.hidden = v.id !== `view-${view}`));
+  if (opts.push !== false) {
+    const h = routeHash(view, view === "pay" ? payState.tab : "");
+    if (location.hash !== h) history.pushState(null, "", h);
+  }
+}
+
+// 按地址栏里的路由切页面；没有路由返回 false（停在默认的账号页）
+function applyRoute() {
+  const r = parseRoute();
+  if (!r) return false;
+  if (r.view === "pay" && r.sub) setPayTab(r.sub, { hash: false });
+  setView(r.view, { push: false });
+  return true;
 }
 
 $$(".nav-item").forEach((b) => b.addEventListener("click", () => setView(b.dataset.view)));
@@ -507,6 +535,8 @@ function applyBootstrap(d) {
   hideLogin(d.user);
   applyData(d.accounts, d.cards);
   if (typeof renderProxy === "function" && d.proxy) renderProxy(d.proxy);
+  if (typeof loadPay === "function") loadPay();     // 左侧「套餐」数量
+  applyRoute();                                     // 刷新 / 登录后回到地址栏里的页面
 }
 
 async function refreshStatus() {
@@ -1591,7 +1621,324 @@ async function consumeHashImport() {
   }
   applyBootstrap(d);
 })();
-window.addEventListener("hashchange", () => consumeHashImport().catch(() => {}));
+window.addEventListener("hashchange", () => {
+  if ((location.hash || "").startsWith("#import=")) consumeHashImport().catch(() => {});
+  else if (!applyRoute()) setView("accounts", { push: false });   // 无效 / 空路由回账号页
+});
+// 浏览器后退 / 前进（pushState 产生的记录不一定触发 hashchange）
+window.addEventListener("popstate", () => applyRoute());
 document.addEventListener("visibilitychange", () => { if (!document.hidden) refreshStatus(); });
 setInterval(refreshStatus, 15000);
 setInterval(() => { renderAccounts(); }, 60000);
+
+/* ------------------------------- 支付 ------------------------------- */
+const payState = { data: null, products: [], pollTimer: null, tab: "alipay", dirty: false };
+
+// 套餐有未保存修改时，在底部提示
+function markDirty(on) {
+  payState.dirty = on;
+  const el = $("#productDirty");
+  if (el) el.textContent = on ? "有未保存的修改" : "";
+}
+
+function renderPlanCount() {
+  const n = payState.products.filter((p) => p.enabled !== false).length;
+  $("#navPlanCount").textContent = n || "";
+}
+
+const ORDER_STATUS = {
+  created: ["待支付", ""], paid: ["已支付", "ok"], activating: ["开通中", ""],
+  done: ["已完成", "ok"], failed: ["失败", "bad"], expired: ["已过期", "bad"], closed: ["已关闭", "bad"],
+};
+
+function secretHint(has) {
+  return has ? "已保存（留空=不修改）" : "未填写";
+}
+
+/* ---- TAB ---- */
+function setPayTab(tab, opts = {}) {
+  const tabs = $$("#payTabs .subtab").map((b) => b.dataset.paytab);
+  if (!tabs.includes(tab)) tab = tabs[0];
+  payState.tab = tab;
+  $$("#payTabs .subtab").forEach((b) => b.classList.toggle("active", b.dataset.paytab === tab));
+  $$("#view-pay .paytab").forEach((p) => { p.hidden = p.dataset.paytab !== tab; });
+  // 切 TAB 只替换地址，不在历史里堆一堆记录
+  if (opts.hash !== false && state.view === "pay") history.replaceState(null, "", routeHash("pay", tab));
+}
+$$("#payTabs .subtab").forEach((b) => b.addEventListener("click", () => setPayTab(b.dataset.paytab)));
+
+function setDot(id, cls) {
+  const el = $(id);
+  if (el) el.className = "tab-dot " + (cls || "");
+}
+
+/* ---- 渲染 ---- */
+function renderPay(d, keepProducts) {
+  payState.data = d;
+  const ready = d.anyReady;
+  $("#payState").textContent = ready ? "已就绪" : "未配置";
+  $("#payState").className = "pill-state " + (ready ? "ok" : "bad");
+
+  $("#payNotifyBase").value = d.notifyBase || "";
+  $("#payNotifyAlipay").textContent = (d.notify && d.notify.alipay) || "（先填回调域名）";
+  $("#payNotifyWechat").textContent = (d.notify && d.notify.wechat) || "（先填回调域名）";
+
+  const a = d.alipay || {};
+  $("#aliEnabled").checked = !!a.enabled;
+  $("#aliAppId").value = a.appId || "";
+  $("#aliGateway").value = a.gateway || "https://openapi.alipay.com/gateway.do";
+  $("#aliPriv").value = ""; $("#aliPrivHint").textContent = secretHint(a.has_appPrivateKey);
+  $("#aliPub").value = ""; $("#aliPubHint").textContent = secretHint(a.has_alipayPublicKey);
+
+  const w = d.wechat || {};
+  $("#wxEnabled").checked = !!w.enabled;
+  $("#wxAppId").value = w.appId || "";
+  $("#wxMchId").value = w.mchId || "";
+  $("#wxSerial").value = w.serialNo || "";
+  $("#wxApiV3").value = ""; $("#wxApiV3Hint").textContent = secretHint(w.has_apiV3Key);
+  $("#wxPriv").value = ""; $("#wxPrivHint").textContent = secretHint(w.has_privateKey);
+  $("#wxCert").value = ""; $("#wxCertHint").textContent = secretHint(w.has_platformCert);
+
+  setDot("#tabDotAli", a.ready ? "ok" : (a.enabled ? "bad" : ""));
+  setDot("#tabDotWx", w.ready ? "ok" : (w.enabled ? "bad" : ""));
+  setDot("#tabDotNotify", d.notifyBase ? "ok" : "bad");
+
+  // 编辑中的套餐未保存时，刷新订单等不要冲掉
+  if (!keepProducts || !payState.dirty) {
+    payState.products = (d.products || []).map((p) => ({ ...p, bullets: (p.bullets || []).slice() }));
+    markDirty(false);
+    renderProducts();
+  }
+  renderPlanCount();
+  renderOrders(d.orders || []);
+}
+
+/* ---- 套餐编辑 ---- */
+function productCard(p, i, n) {
+  const yuan = (Number(p.price || 0) / 100).toFixed(2);
+  const planBadge = p.plan === "pro" ? '<span class="badge pro">Pro</span>' : '<span class="badge plus">Plus</span>';
+  return `
+  <div class="prod-card ${p.enabled === false ? "off" : ""}" data-i="${i}">
+    <div class="prod-head">
+      <span class="prod-idx">${i + 1}</span>
+      <b>${esc(p.title || "未命名套餐")}${p.variant ? " · " + esc(p.variant) : ""}</b>
+      ${planBadge}
+      ${p.recommend ? '<span class="badge">推荐</span>' : ""}
+      ${p.enabled === false ? '<span class="badge">已下架</span>' : ""}
+      <span class="spacer"></span>
+      <b class="prod-price">¥${yuan}</b>
+      <button class="mini" data-act="up" ${i === 0 ? "disabled" : ""} title="上移">↑</button>
+      <button class="mini" data-act="down" ${i === n - 1 ? "disabled" : ""} title="下移">↓</button>
+      <button class="mini" data-act="dup" title="复制一份">复制</button>
+      <button class="mini" data-act="del" title="删除">删除</button>
+    </div>
+    <div class="field-grid prod-grid">
+      <label class="field"><span>卡片标题</span>
+        <input class="input" data-k="title" maxlength="40" placeholder="ChatGPT Pro" value="${esc(p.title)}" /></label>
+      <label class="field"><span>档位名（可空）</span>
+        <input class="input" data-k="variant" maxlength="30" placeholder="5X · 100" value="${esc(p.variant)}" /></label>
+      <label class="field"><span>价格（元）</span>
+        <input class="input" data-k="price" inputmode="decimal" placeholder="179.00" value="${yuan}" /></label>
+      <label class="field"><span>开通类型</span>
+        <select class="input" data-k="plan">
+          <option value="plus" ${p.plan === "plus" ? "selected" : ""}>Plus</option>
+          <option value="pro" ${p.plan === "pro" ? "selected" : ""}>Pro</option>
+        </select></label>
+      <label class="field"><span>大字副标题</span>
+        <input class="input" data-k="subtitle" maxlength="60" placeholder="更高阶的选择" value="${esc(p.subtitle)}" /></label>
+      <label class="field"><span>小字说明</span>
+        <input class="input" data-k="desc" maxlength="120" placeholder="ChatGPT Pro 100$ 5X" value="${esc(p.desc)}" /></label>
+      <label class="field span2"><span>权益列表（一行一条，最多 15 条）</span>
+        <textarea data-k="bullets" rows="5" spellcheck="false" placeholder="高级智能，应对复杂工作&#10;生成更高质量的图像">${esc((p.bullets || []).join("\n"))}</textarea></label>
+      <div class="field span2 prod-flags">
+        <label class="row small"><input type="checkbox" data-k="enabled" ${p.enabled !== false ? "checked" : ""} /> 在首页上架</label>
+        <label class="row small"><input type="checkbox" data-k="recommend" ${p.recommend ? "checked" : ""} /> 推荐（高亮这张卡）</label>
+        <label class="row small prod-id">编号 <input class="input" data-k="id" maxlength="32" value="${esc(p.id)}" /></label>
+      </div>
+    </div>
+  </div>`;
+}
+
+function renderProducts() {
+  const list = payState.products;
+  $("#productList").innerHTML = list.length
+    ? list.map((p, i) => productCard(p, i, list.length)).join("")
+    : '<div class="ch-empty">还没有套餐，点「+ 添加套餐」。</div>';
+}
+
+// 从表单读回 payState.products（价格转成分）
+function syncProducts() {
+  $$("#productList .prod-card").forEach((card) => {
+    const p = payState.products[+card.dataset.i];
+    if (!p) return;
+    $$("[data-k]", card).forEach((el) => {
+      const k = el.dataset.k;
+      if (el.type === "checkbox") p[k] = el.checked;
+      else if (k === "price") p.price = Math.round(parseFloat(el.value || "0") * 100) || 0;
+      else if (k === "bullets") p.bullets = el.value.split("\n").map((x) => x.trim()).filter(Boolean);
+      else p[k] = el.value.trim();
+    });
+  });
+  return payState.products;
+}
+
+function newProductId() {
+  const used = new Set(payState.products.map((p) => p.id));
+  let n = payState.products.length + 1;
+  while (used.has("p" + n)) n++;
+  return "p" + n;
+}
+
+$("#productList").addEventListener("input", () => { markDirty(true); });
+$("#productList").addEventListener("change", (e) => {
+  markDirty(true);
+  // 勾选 / 下拉变化时刷新卡片头部的预览
+  if (e.target.matches("select, input[type=checkbox], [data-k=title], [data-k=variant], [data-k=price]")) {
+    syncProducts(); renderProducts();
+  }
+});
+$("#productList").addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-act]");
+  if (!btn) return;
+  syncProducts();
+  const i = +btn.closest(".prod-card").dataset.i;
+  const list = payState.products;
+  const act = btn.dataset.act;
+  if (act === "up" && i > 0) [list[i - 1], list[i]] = [list[i], list[i - 1]];
+  if (act === "down" && i < list.length - 1) [list[i + 1], list[i]] = [list[i], list[i + 1]];
+  if (act === "dup") list.splice(i + 1, 0, { ...list[i], id: newProductId(), bullets: list[i].bullets.slice() });
+  if (act === "del") {
+    if (!confirm(`删除「${list[i].title || "该套餐"}」？保存后生效。`)) return;
+    list.splice(i, 1);
+  }
+  markDirty(true);
+  renderProducts();
+});
+
+$("#addProductBtn").addEventListener("click", () => {
+  syncProducts();
+  payState.products.push({ id: newProductId(), title: "", variant: "", plan: "plus", price: 0,
+    subtitle: "", desc: "", bullets: [], enabled: true, recommend: false });
+  markDirty(true);
+  renderProducts();
+  const last = $("#productList .prod-card:last-child [data-k=title]");
+  if (last) { last.scrollIntoView({ behavior: "smooth", block: "center" }); last.focus(); }
+});
+
+async function saveProducts(btn) {
+  busy(btn, true);
+  try {
+    const d = await api("/api/pay/products", { method: "POST", body: JSON.stringify({ products: syncProducts() }) });
+    markDirty(false);
+    renderPay(d);
+    toast("套餐已保存，首页刷新即生效", "ok");
+  } catch (e) { toast(e.message, "bad"); } finally { busy(btn, false); }
+}
+$("#saveProductsBtn").addEventListener("click", (e) => saveProducts(e.currentTarget));
+$("#saveProductsBtn2").addEventListener("click", (e) => saveProducts(e.currentTarget));
+
+/* ---- 订单 ---- */
+function renderOrders(orders) {
+  $("#orderCount").textContent = orders.length || "";
+  $("#orderList").innerHTML = orders.length ? orders.map((o) => {
+    const st = ORDER_STATUS[o.status] || [o.status, ""];
+    const chan = o.channel === "alipay" ? "支付宝" : "微信";
+    return `<div class="ch-row">
+      <div class="ch-main">
+        <div class="ch-name">${esc(o.subject)} <span class="badge">${chan}</span>
+          ${o.test ? '<span class="badge">测试</span>' : ""}
+          <span class="status ${st[1]}">${st[0]}</span></div>
+        <div class="ch-sub">¥${o.amountYuan} · ${esc(o.outTradeNo)}${o.email ? " · " + esc(o.email) : ""}${o.contact ? " · " + esc(o.contact) : ""}${o.providerTradeNo ? " · 交易号 " + esc(o.providerTradeNo) : ""} · ${payTime(o.createdAt)}</div>
+      </div>
+    </div>`;
+  }).join("") : '<div class="ch-empty">还没有订单</div>';
+}
+
+function payTime(ts) {
+  if (!ts) return "";
+  const d = new Date(ts * 1000);
+  const p = (n) => String(n).padStart(2, "0");
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+async function loadPay() {
+  try { renderPay(await api("/api/pay"), true); }
+  catch (e) { $("#payState").textContent = "读取失败"; $("#payState").className = "pill-state bad"; }
+}
+
+/* ---- 渠道 / 回调保存 ---- */
+async function savePay(body) {
+  const d = await api("/api/pay/config", { method: "POST", body: JSON.stringify(body) });
+  renderPay(d, true);
+  toast("已保存", "ok");
+}
+
+$("#aliSaveBtn").addEventListener("click", async () => {
+  const btn = $("#aliSaveBtn"); busy(btn, true);
+  try {
+    await savePay({ alipay: {
+      enabled: $("#aliEnabled").checked, appId: $("#aliAppId").value.trim(),
+      gateway: $("#aliGateway").value.trim(),
+      appPrivateKey: $("#aliPriv").value.trim(), alipayPublicKey: $("#aliPub").value.trim(),
+    } });
+  } catch (e) { toast(e.message, "bad"); } finally { busy(btn, false); }
+});
+
+$("#wxSaveBtn").addEventListener("click", async () => {
+  const btn = $("#wxSaveBtn"); busy(btn, true);
+  try {
+    await savePay({ wechat: {
+      enabled: $("#wxEnabled").checked, appId: $("#wxAppId").value.trim(),
+      mchId: $("#wxMchId").value.trim(), serialNo: $("#wxSerial").value.trim(),
+      apiV3Key: $("#wxApiV3").value.trim(), privateKey: $("#wxPriv").value.trim(),
+      platformCert: $("#wxCert").value.trim(),
+    } });
+  } catch (e) { toast(e.message, "bad"); } finally { busy(btn, false); }
+});
+
+$("#notifySaveBtn").addEventListener("click", async () => {
+  const v = $("#payNotifyBase").value.trim();
+  if (v && !/^https:\/\/[^/\s]+$/.test(v.replace(/\/+$/, ""))) {
+    return toast("回调域名需以 https:// 开头，只填域名，例如 https://chat-ai.51aihelp.com", "bad");
+  }
+  const btn = $("#notifySaveBtn"); busy(btn, true);
+  try { await savePay({ notifyBase: v }); }
+  catch (e) { toast(e.message, "bad"); } finally { busy(btn, false); }
+});
+
+/* ---- ¥0.01 联调 ---- */
+function stopPayPoll() { if (payState.pollTimer) { clearInterval(payState.pollTimer); payState.pollTimer = null; } }
+
+async function testOrder(channel) {
+  const btn = channel === "alipay" ? $("#aliTestBtn") : $("#wxTestBtn");
+  busy(btn, true);
+  try {
+    const d = await api("/api/pay/order/test", { method: "POST", body: JSON.stringify({ channel }) });
+    $("#payQrTitle").textContent = (channel === "alipay" ? "支付宝" : "微信") + " 扫码 ¥0.01";
+    $("#payQrImg").src = d.qrImg || "";
+    $("#payQrState").textContent = d.qrImg ? "用手机扫码支付，支付后自动变「已支付」。" : "二维码生成失败，可用订单号在商户后台核对。";
+    $("#payQrState").className = "ch-sub";
+    $("#payQrModal").classList.remove("hidden");
+    stopPayPoll();
+    payState.pollTimer = setInterval(async () => {
+      try {
+        const r = await api("/api/pay/order/query", { method: "POST", body: JSON.stringify({ token: d.token }) });
+        if (r.order && r.order.status !== "created") {
+          stopPayPoll();
+          const paid = r.order.status === "paid";
+          $("#payQrState").textContent = paid ? "✓ 已支付，联调成功！" : "订单状态：" + r.order.status;
+          $("#payQrState").className = "ch-sub " + (paid ? "ok" : "bad");
+          loadPay();
+        }
+      } catch (e) { /* ignore */ }
+    }, 3000);
+  } catch (e) { toast(e.message, "bad"); } finally { busy(btn, false); }
+}
+$("#aliTestBtn").addEventListener("click", () => testOrder("alipay"));
+$("#wxTestBtn").addEventListener("click", () => testOrder("wechat"));
+$("#payQrClose").addEventListener("click", () => { $("#payQrModal").classList.add("hidden"); stopPayPoll(); });
+$("#payQrModal").addEventListener("click", (e) => { if (e.target.id === "payQrModal") { $("#payQrModal").classList.add("hidden"); stopPayPoll(); } });
+$("#ordersRefreshBtn").addEventListener("click", () => loadPay());
+window.addEventListener("beforeunload", (e) => {
+  if (payState.dirty) { e.preventDefault(); e.returnValue = ""; }
+});

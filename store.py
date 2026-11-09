@@ -4,6 +4,7 @@ import os
 import re
 import secrets
 import threading
+import time
 
 import cgpt
 import crypto_store
@@ -233,6 +234,57 @@ def ensure_codes():
     if changed:
         save_cards(data)
     return data
+
+
+def card_available_for_pay(card, plan):
+    """付款池可用的卡：启用、未被兑换/占用、支持该套餐。"""
+    return (card.get("status", "active") == "active"
+            and not card.get("codeUsedAt")
+            and not card.get("payOrder")
+            and not card.get("codeRevoked")
+            and plan in card_plans(card))
+
+
+def count_available_cards():
+    """各套餐当前可用库存数（付款下单前判断是否有货）。"""
+    out = {p: 0 for p in VALID_PLANS}
+    for c in load_cards()["cards"]:
+        for p in VALID_PLANS:
+            if card_available_for_pay(c, p):
+                out[p] += 1
+    return out
+
+
+def reserve_available_card(plan, order_id):
+    """原子占用一张可用卡给付款订单用：置 codeUsedAt + payOrder，兑换码同时失效，杜绝双花。
+
+    返回解密后的卡副本；没有库存返回 None。
+    """
+    plan = (plan or "").lower()
+    with _store_lock:
+        data = load_cards()
+        for c in data["cards"]:
+            if card_available_for_pay(c, plan):
+                now = int(time.time())
+                c["codeUsedAt"] = now
+                c["lastUsedAt"] = now
+                c["payOrder"] = order_id
+                save_cards(data)
+                return dict(c)
+    return None
+
+
+def release_card(card_id, order_id):
+    """开通失败时释放占用（仅当仍被该订单占用），让卡可被重新使用。"""
+    with _store_lock:
+        data = load_cards()
+        for c in data["cards"]:
+            if c.get("id") == card_id and c.get("payOrder") == order_id:
+                c["codeUsedAt"] = None
+                c["payOrder"] = None
+                save_cards(data)
+                return True
+    return False
 
 
 def find_card_by_code(code):

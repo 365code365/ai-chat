@@ -23,14 +23,17 @@ import threading
 import time
 import uuid
 
+import urllib.parse
+
 import cgpt
+import payhub
 import proxyhub
 from browser import POOL
 from httpbase import JSONHandler, ThreadingHTTPServer
 from store import (
     SHOT_DIR, VALID_PLANS, card_plans, code_active, code_state,
     customer_card_view, ensure_codes, find_card_by_code, load_cards, save_cards,
-    save_job,
+    save_job, reserve_available_card, release_card,
 )
 
 # 订阅链路的环节（key -> 中文名），兑换记录按此展示「卡在哪一步」
@@ -62,6 +65,22 @@ _jobs = {}
 _job_lock = threading.Lock()
 # 允许排队的最大在途任务数（池并发 + 少量排队），超过直接婉拒
 MAX_PENDING = POOL.size + 3
+
+# 下单接口按 IP 限流，防刷
+_pay_rate = {}
+_pay_rate_lock = threading.Lock()
+
+
+def _pay_rate_ok(ip, limit=10, window=60):
+    now = time.time()
+    with _pay_rate_lock:
+        q = [t for t in _pay_rate.get(ip, []) if now - t < window]
+        if len(q) >= limit:
+            _pay_rate[ip] = q
+            return False
+        q.append(now)
+        _pay_rate[ip] = q
+        return True
 
 
 def _add_job(job):
@@ -173,8 +192,12 @@ def _note_proxy(job, br):
     threading.Thread(target=run, daemon=True).start()
 
 
-def run_subscribe(job, card, plan, session):
-    """后台跑完整订阅链路，逐步更新进度。每笔占用池里一个独立浏览器。"""
+def run_subscribe(job, card, plan, session, recheck_code=True):
+    """后台跑完整订阅链路，逐步更新进度。每笔占用池里一个独立浏览器。
+
+    recheck_code=True（兑换码流程）：开跑前再核对兑换码，挡住同码重复下单。
+    付款流程的卡已在下单时原子占用，不需要也不能按兑换码复核，传 False。
+    """
     last_cdp = None
     br = None
     try:
@@ -182,10 +205,11 @@ def run_subscribe(job, card, plan, session):
         br = POOL.acquire()
         _log(job, "已分配浏览器：%s" % br.name)
 
-        # 重新核对兑换码，挡住「同码重复下单」。
-        fresh = find_card_by_code(card.get("code"))
-        if not fresh or not code_active(fresh):
-            raise RuntimeError("兑换码已被使用或失效，已阻止重复下单")
+        if recheck_code:
+            # 重新核对兑换码，挡住「同码重复下单」。
+            fresh = find_card_by_code(card.get("code"))
+            if not fresh or not code_active(fresh):
+                raise RuntimeError("兑换码已被使用或失效，已阻止重复下单")
 
         items, err = cgpt.parse_session(session)
         if err or not items:
@@ -210,6 +234,8 @@ def run_subscribe(job, card, plan, session):
         # 登录直接落在该套餐的订阅弹窗，省掉首页 / 定价页两次整页加载
         email = br.login(account, landing=cgpt.plan_dialog_url(plan))
         _note_proxy(job, br)
+        if br.fp:
+            _log(job, "设备指纹：%s" % cgpt.fingerprint.summary(br.fp))
         _log(job, "已登录：%s" % email)
 
         _set_step(job, "plan", "running", "正在打开%s订阅页…" % ("Plus" if plan == "plus" else "Pro"))
@@ -225,8 +251,7 @@ def run_subscribe(job, card, plan, session):
         if not tab:
             raise RuntimeError("没能进入付款页（可能已经是当前套餐，或页面加载超时）")
         url = tab.get("url", "")
-        cdp = cgpt.CDP(tab["webSocketDebuggerUrl"])
-        cdp.call("Page.enable")
+        cdp = br.connect(tab)
         last_cdp = cdp
         _log(job, "付款页：%s" % url[:80])
 
@@ -297,6 +322,22 @@ def run_subscribe(job, card, plan, session):
         _persist(job)
 
 
+def run_pay_activation(order, job, card, session):
+    """付款订单的开通：复用订阅链路（不按兑换码复核），结束后回写订单状态。
+
+    成功 → 订单 done；失败 → 释放占用的卡（可重试），订单回到 paid。
+    """
+    run_subscribe(job, card, order.get("plan"), session, recheck_code=False)
+    try:
+        if job.get("ok"):
+            payhub.update_order(order["token"], status="done")
+        else:
+            release_card(card.get("id"), order["id"])
+            payhub.update_order(order["token"], status="paid")
+    except Exception:
+        pass
+
+
 # --------------------------------------------------------------------------- #
 # HTTP
 # --------------------------------------------------------------------------- #
@@ -318,18 +359,135 @@ class Handler(JSONHandler):
             # 浅拷贝后再序列化：任务线程可能正在往 job 里加字段
             return self._send(200, {k: v for k, v in dict(job).items()
                                     if k not in _PRIVATE_FIELDS})
+        if path == "/api/pay/products":
+            return self.api_pay_products()
+        m = re.match(r"^/api/pay/order/([^/]+)$", path)
+        if m:
+            return self.api_pay_order(m.group(1))
         return self.static_file(path)
 
     def do_POST(self):
         path = self._path()
+        # 支付回调：必须公开、读原始报文、按平台要求回文本/JSON，异常也不能抛 500 给平台
+        if path in ("/api/pay/alipay/notify", "/api/pay/wechat/notify"):
+            return self.api_pay_notify(path.split("/")[3])
         try:
             if path == "/api/verify":
                 return self.api_verify()
             if path == "/api/subscribe":
                 return self.api_subscribe()
+            if path == "/api/pay/create":
+                return self.api_pay_create()
+            if path == "/api/pay/activate":
+                return self.api_pay_activate()
             return self._err("未知接口", 404)
         except Exception as exc:
             return self._err(exc, 500)
+
+    # ---------- 支付 ----------
+    def api_pay_products(self):
+        """付款页用：套餐 + 各渠道是否可用。"""
+        cfg = payhub.load_config()
+        channels = [c for c in payhub.CHANNELS if payhub.channel_ready(cfg, c)]
+        return self._send(200, {
+            "products": payhub.public_products(cfg),
+            "channels": channels,
+            "enabled": bool(channels),
+        })
+
+    def api_pay_create(self):
+        if not _pay_rate_ok(self.client_address[0]):
+            return self._err("操作过于频繁，请稍后再试", 429)
+        body = self._body()
+        order, res = payhub.create_order(
+            body.get("channel"), body.get("productId"),
+            email=body.get("email", ""), contact=body.get("contact", ""))
+        if not res.get("ok"):
+            return self._err(res.get("error") or "下单失败")
+        return self._send(200, {"ok": True, "token": order["token"], "qr": res["qr"],
+                                "qrImg": payhub.qr_data_uri(res["qr"]),
+                                "channel": order["channel"], "outTradeNo": order["outTradeNo"],
+                                "amountYuan": "%.2f" % (order["amount"] / 100.0),
+                                "expireAt": order["expireAt"]})
+
+    def api_pay_order(self, token):
+        order = payhub.query_and_sync(token)
+        if not order:
+            return self._err("订单不存在", 404)
+        return self._send(200, {
+            "token": order["token"], "status": order["status"],
+            "channel": order["channel"], "subject": order["subject"],
+            "amountYuan": "%.2f" % (order["amount"] / 100.0),
+            "qr": order.get("qr", ""), "qrImg": payhub.qr_data_uri(order.get("qr", "")),
+            "plan": order.get("plan", ""),
+            "paid": order["status"] in ("paid", "activating", "done"),
+            "jobId": order.get("activateJobId") or "",
+            "expireAt": order.get("expireAt"),
+        })
+
+    def api_pay_activate(self):
+        """付款成功后：客户粘贴 ChatGPT 登录态 → 占用一张库存卡 → 走开通链路。"""
+        body = self._body()
+        token = body.get("token") or ""
+        raw = body.get("session") or body.get("raw") or ""
+        order = payhub.get_order(token)
+        if not order:
+            return self._err("订单不存在", 404)
+        if order.get("status") == "done":
+            return self._err("该订单已开通完成")
+        if order.get("status") == "activating" and order.get("activateJobId"):
+            return self._send(200, {"jobId": order["activateJobId"]})
+        if order.get("status") != "paid":
+            return self._err("订单尚未支付成功，请先完成付款")
+        plan = (order.get("plan") or "").lower()
+        if plan not in VALID_PLANS:
+            return self._err("订单套餐异常，请联系客服")
+        _, serr = check_session(raw)
+        if serr:
+            return self._err(serr)
+        pending = sum(1 for j in _jobs.values() if not j.get("done"))
+        if pending >= MAX_PENDING:
+            return self._err("当前开通的人较多，请稍后再试", 429)
+        card = reserve_available_card(plan, order["id"])
+        if not card:
+            return self._err("暂时没有可用库存，我们会尽快为你开通，请保存本页或联系客服")
+        job = {
+            "id": uuid.uuid4().hex[:12],
+            "code": order.get("outTradeNo", ""),
+            "plan": plan,
+            "step": "queued", "status": "queued", "message": "排队中…",
+            "done": False, "ok": None, "log": [],
+            "createdAt": int(time.time()),
+        }
+        _add_job(job)
+        payhub.update_order(token, status="activating", activateJobId=job["id"])
+
+        def runner():
+            run_pay_activation(order, job, dict(card), raw)
+
+        threading.Thread(target=runner, daemon=True).start()
+        return self._send(200, {"jobId": job["id"]})
+
+    def api_pay_notify(self, channel):
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except Exception:
+            n = 0
+        raw = self.rfile.read(n).decode("utf-8", "replace") if n else ""
+        form = None
+        if channel == "alipay":
+            form = {k: v[0] for k, v in urllib.parse.parse_qs(raw).items()}
+        headers = {k: self.headers.get(k, "") for k in
+                   ("Wechatpay-Timestamp", "Wechatpay-Nonce", "Wechatpay-Signature", "Wechatpay-Serial")}
+        try:
+            ok, ack = payhub.handle_notify(channel, headers, raw, form)
+        except Exception:
+            ok, ack = False, ("failure" if channel == "alipay" else '{"code":"FAIL","message":"FAIL"}')
+        if channel == "alipay":
+            # 支付宝按「响应体」判成功，始终 200，body 为 success/failure
+            return self._send(200, ack, ctype="text/plain; charset=utf-8")
+        # 微信按 HTTP 状态判成功：200=已接收，非 2xx 会重推
+        return self._send(200 if ok else 500, ack, ctype="application/json")
 
     # ---------- 接口 ----------
     def api_verify(self):

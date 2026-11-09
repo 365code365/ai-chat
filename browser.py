@@ -5,6 +5,7 @@
 避免一次开太多 Chrome 把内存吃爆）。
 """
 import os
+import shutil
 import socket
 import subprocess
 import threading
@@ -33,7 +34,7 @@ def relay_alive(port=RELAY_PORT, timeout=0.6):
 
 
 class Browser(object):
-    def __init__(self, port=BROWSER_PORT, profile=BROWSER_PROFILE, name="main"):
+    def __init__(self, port=BROWSER_PORT, profile=BROWSER_PROFILE, name="main", spoof=True):
         self.port = port
         self.profile = profile
         self.name = name
@@ -46,6 +47,9 @@ class Browser(object):
         self.slot = name                         # 代理槽位：中继上独立端口 + 独立租约
         self.relay_port = proxyhub.slot_port(name)
         self.lease = None
+        # 每次启动前清空 profile 并换一份随机指纹，避免相邻两个账户设备指纹一致
+        self.spoof = spoof
+        self.fp = None
 
     # ---- 基础 ----
     def running(self):
@@ -67,11 +71,38 @@ class Browser(object):
                      "--proxy-bypass-list=127.0.0.1;localhost;::1"]
         else:
             self.lease = None
+        ua, env = None, None
+        if self.spoof:
+            # 清空上一位客户留下的 cookie / 本地存储 / 缓存，再换一份新指纹
+            self._wipe_profile()
+            self.fp = cgpt.fingerprint.generate()
+            extra += cgpt.fingerprint.launch_flags(self.fp)
+            ua = self.fp["ua"]
+            env = cgpt.fingerprint.launch_env(self.fp)
         self.proc = cgpt.launch_browser(
             self.port, self.profile, headless=cgpt.HEADLESS,
             log_path=os.path.join(HERE, "chrome-%s.log" % self.name), extra_args=extra,
+            user_agent=ua, env=env,
         )
         self.started_at = time.time()
+
+    def _wipe_profile(self):
+        """删掉 profile 目录，让下一次启动是一张白纸（无 cookie / localStorage / 缓存）。"""
+        try:
+            shutil.rmtree(self.profile, ignore_errors=True)
+        except Exception:
+            pass
+
+    def _apply_fp(self, cdp):
+        if self.spoof and self.fp:
+            cgpt.fingerprint.apply(cdp, self.fp)
+        return cdp
+
+    def connect(self, tab):
+        """连到一个标签页（如结账页在新标签打开），带上当前指纹覆盖。"""
+        cdp = cgpt.CDP(tab["webSocketDebuggerUrl"])
+        cdp.call("Page.enable")
+        return self._apply_fp(cdp)
 
     def attach(self, blank_ok=False):
         """返回绑定到 chatgpt.com 标签页的 CDP；浏览器没开就先拉起来。
@@ -98,6 +129,8 @@ class Browser(object):
         self.cdp = cgpt.CDP(tab["webSocketDebuggerUrl"])
         self.cdp.call("Page.enable")
         self.cdp.call("Network.enable")
+        # 伪装指纹：在导航到 chatgpt 之前装好，首帧加载即生效
+        self._apply_fp(self.cdp)
         return self.cdp
 
     def kill(self):
@@ -187,10 +220,9 @@ class Browser(object):
             res["screenshot"] = cgpt.capture(cdp, shot_path)
             res["elapsedMs"] = int((time.time() - t0) * 1000)
             return res
-        # 结账页可能在原标签，也可能是新标签：直接连到它
-        co = cgpt.CDP(tab["webSocketDebuggerUrl"])
+        # 结账页可能在原标签，也可能是新标签：直接连到它（带上同一份指纹）
+        co = self.connect(tab)
         try:
-            co.call("Page.enable")
             res["url"] = tab.get("url", "")
             res["ok"] = True
             res["ready"] = cgpt.wait_card_ready(self.port, timeout=60)

@@ -31,6 +31,7 @@ import admin_auth
 import captcha
 import cgpt
 from admin_proxy import ProxyAdminMixin
+from admin_pay import PayAdminMixin
 from browser import BROWSER
 from httpbase import JSONHandler, ThreadingHTTPServer
 from store import (
@@ -158,7 +159,7 @@ def recheck(acc_id):
 # --------------------------------------------------------------------------- #
 # HTTP
 # --------------------------------------------------------------------------- #
-class Handler(ProxyAdminMixin, JSONHandler):
+class Handler(ProxyAdminMixin, PayAdminMixin, JSONHandler):
     server_version = "CGPTAdmin/1.0"
 
     def log_message(self, fmt, *args):
@@ -200,6 +201,10 @@ class Handler(ProxyAdminMixin, JSONHandler):
                 return self.api_cards()
             if path == "/api/jobs":
                 return self.api_jobs()
+            if path == "/api/pay":
+                return self.api_pay()
+            if path == "/api/pay/orders":
+                return self._send(200, self.pay_payload())
             if path == "/api/vnc":
                 return self.api_vnc()
             m = re.match(r"^/api/accounts/([^/]+)/token$", path)
@@ -224,6 +229,8 @@ class Handler(ProxyAdminMixin, JSONHandler):
                 return self.api_import()
             if path.startswith("/api/proxy"):
                 return self.api_proxy_post(path)
+            if path.startswith("/api/pay"):
+                return self.api_pay_post(path)
             if path == "/api/login":
                 return self.api_login()
             if path == "/api/logout":

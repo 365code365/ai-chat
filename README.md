@@ -1,5 +1,8 @@
 # TokenDesk
 
+**自助充值地址：<https://chat-ai.51aihelp.com>**
+
+
 ChatGPT 订阅自动化工具，分两套完全隔离的页面：
 
 | 端口 | 页面 | 主题 | 登录 | 使用者 |

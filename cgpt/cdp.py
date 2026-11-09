@@ -89,9 +89,13 @@ def _headless_ua():
             "(KHTML, like Gecko) Chrome/%s Safari/537.36" % ver)
 
 
-def launch_browser(port, profile, headless=False, log_path=None, extra_args=None):
+def launch_browser(port, profile, headless=False, log_path=None, extra_args=None,
+                   user_agent=None, env=None):
     if not CHROME or not os.path.exists(CHROME):
         raise RuntimeError("没有找到浏览器（Chrome / Chromium），请先安装，或用 TD_CHROME 指定路径")
+    extra_args = list(extra_args or [])
+    # 指纹模块可能已经通过 extra_args 指定窗口大小，避免重复
+    has_window = any(a.startswith("--window-size=") for a in extra_args)
     cmd = [
         CHROME,
         "--no-sandbox",
@@ -99,7 +103,6 @@ def launch_browser(port, profile, headless=False, log_path=None, extra_args=None
         "--remote-debugging-port=%d" % port,
         "--no-first-run",
         "--no-default-browser-check",
-        "--window-size=1440,960",
         "--disable-dev-shm-usage",
         # —— 省内存：关掉站点隔离（每个站点一个进程是内存大户），限制渲染进程数 ——
         "--disable-features=IsolateOrigins,site-per-process,Translate,"
@@ -130,16 +133,23 @@ def launch_browser(port, profile, headless=False, log_path=None, extra_args=None
         "--disk-cache-size=33554432",
         "--media-cache-size=16777216",
     ]
-    cmd += list(extra_args or [])
+    if not has_window:
+        cmd.append("--window-size=1440,960")
+    cmd += extra_args
     if headless:
         cmd += ["--headless=new"]
-        ua = _headless_ua()
-        if ua:
-            cmd.append("--user-agent=%s" % ua)
+    # UA：指纹模块指定的优先；否则无界面模式用去掉 Headless 字样的默认 UA
+    ua = user_agent or (_headless_ua() if headless else "")
+    if ua:
+        cmd.append("--user-agent=%s" % ua)
     cmd.append("about:blank")
+    run_env = None
+    if env:
+        run_env = dict(os.environ)
+        run_env.update(env)
     log = open(log_path, "ab") if log_path else subprocess.DEVNULL
     proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT,
-                            start_new_session=True)
+                            start_new_session=True, env=run_env)
     if not debugger_ready(port, 45):
         raise RuntimeError("Chrome 调试端口 %d 未就绪（见 chrome.log）" % port)
     return proc

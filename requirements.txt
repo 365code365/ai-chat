@@ -1,3 +1,4 @@
 requests>=2.31
 websocket-client>=1.6
 cryptography>=42.0
+segno>=1.5
